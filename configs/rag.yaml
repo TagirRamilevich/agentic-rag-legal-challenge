@@ -4,11 +4,17 @@ data_dir: data
 cache_dir: .cache
 submission_path: submission.json
 code_archive_path: code_archive.zip
-architecture_summary: "BM25 page-level retrieval with deterministic rule-based extraction. No LLM. Phase-scoped corpus, 1-based PDF pages."
+architecture_summary: "BM25(top-20) + cross-encoder rerank(top-5) + Claude Haiku extraction. Phase-scoped corpus, 1-based PDF pages, deterministic fallback."
 
 retrieval:
   top_k_bm25: 20
+  top_k_rerank: 5
   neighbor_pages: true
+  use_reranker: true
+  reranker_model: "cross-encoder/ms-marco-MiniLM-L-6-v2"
+
+llm:
+  use_llm: true
 
 answering:
   free_text_fallback: "There is no information on this question in the provided documents."

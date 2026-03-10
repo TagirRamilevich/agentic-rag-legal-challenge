@@ -15,20 +15,25 @@ import yaml
 from src.pipeline.ingest import ingest_corpus, get_page_counts
 from src.pipeline.index import get_or_build_index
 from src.pipeline.retrieve import retrieve_pages
+from src.pipeline.rerank import rerank_pages
+from src.pipeline.llm import answer_with_llm
 from src.pipeline.answer import answer_question
 from src.pipeline.telemetry import build_telemetry
 from src.utils.json_schema import validate_submission
 from arlc import EvaluationClient
 
 
-def load_config(config_path: str) -> dict:
-    with open(config_path) as f:
+def load_config(path: str) -> dict:
+    with open(path) as f:
         return yaml.safe_load(f)
 
 
 def _build_code_archive(archive_path: str):
     client = EvaluationClient.from_env()
-    include = [p for p in ["src", "scripts", "configs", "arlc", "requirements.txt", "CLAUDE.md"] if os.path.exists(p)]
+    include = [
+        p for p in ["src", "scripts", "configs", "arlc", "requirements.txt", "CLAUDE.md"]
+        if os.path.exists(p)
+    ]
     client.create_code_archive(include, archive_path)
     print(f"Code archive: {archive_path}")
 
@@ -61,17 +66,45 @@ def main(phase: str, config_path: str = "configs/rag.yaml", skip_validate: bool 
         questions = json.load(f)
     print(f"      {len(questions)} questions")
 
-    top_k = cfg["retrieval"]["top_k_bm25"]
+    top_k_bm25 = cfg["retrieval"]["top_k_bm25"]
+    top_k_rerank = cfg["retrieval"]["top_k_rerank"]
     add_neighbors = cfg["retrieval"]["neighbor_pages"]
+    use_reranker = cfg["retrieval"].get("use_reranker", True)
+    reranker_model = cfg["retrieval"].get("reranker_model", "cross-encoder/ms-marco-MiniLM-L-6-v2")
+    use_llm = cfg["llm"].get("use_llm", True)
+
     answers = []
+    null_count = 0
+    llm_count = 0
 
     print("[4/4] Answering questions ...")
-    for q in questions:
+    for i, q in enumerate(questions, 1):
         t0 = time.perf_counter()
-        retrieved = retrieve_pages(bm25, pages, q["question"], top_k=top_k, add_neighbors=add_neighbors)
-        answer, used_pages = answer_question(q, retrieved)
+
+        retrieved = retrieve_pages(bm25, pages, q["question"], top_k=top_k_bm25, add_neighbors=add_neighbors)
+
+        if use_reranker:
+            final_pages = rerank_pages(retrieved, q["question"], top_k=top_k_rerank, model_name=reranker_model)
+        else:
+            final_pages = retrieved[:top_k_rerank]
+
+        if use_llm:
+            answer, used_pages = answer_with_llm(q, final_pages)
+            llm_count += 1
+        else:
+            answer, used_pages = answer_question(q, final_pages)
+
+        if answer is None:
+            null_count += 1
+
         telemetry = build_telemetry(t0, used_pages)
         answers.append({"question_id": q["question_id"], "answer": answer, "telemetry": telemetry})
+
+        if i % 10 == 0 or i == len(questions):
+            elapsed = time.perf_counter() - t0
+            print(f"      {i}/{len(questions)} done  (last ttft {telemetry['timing']['ttft_ms']}ms)")
+
+    print(f"      null answers: {null_count}/{len(questions)}, llm calls: {llm_count}")
 
     submission = {
         "architecture_summary": cfg.get("architecture_summary", "")[:500],
@@ -80,7 +113,11 @@ def main(phase: str, config_path: str = "configs/rag.yaml", skip_validate: bool 
 
     if not skip_validate:
         page_counts = get_page_counts(docs_dir) if os.path.isdir(docs_dir) else {}
-        errors = validate_submission(submission, docs_dir if os.path.isdir(docs_dir) else None, page_counts)
+        errors = validate_submission(
+            submission,
+            docs_dir if os.path.isdir(docs_dir) else None,
+            page_counts,
+        )
         if errors:
             print("Validation FAILED:")
             for e in errors:
@@ -104,5 +141,20 @@ if __name__ == "__main__":
     parser.add_argument("--phase", required=True, choices=["warmup", "final"])
     parser.add_argument("--config", default="configs/rag.yaml")
     parser.add_argument("--no-validate", action="store_true")
+    parser.add_argument("--no-llm", action="store_true", help="Use deterministic-only mode")
+    parser.add_argument("--no-rerank", action="store_true", help="Skip cross-encoder reranking")
     args = parser.parse_args()
-    main(args.phase, args.config, skip_validate=args.no_validate)
+
+    if args.no_llm or args.no_rerank:
+        cfg = load_config(args.config)
+        if args.no_llm:
+            cfg["llm"]["use_llm"] = False
+        if args.no_rerank:
+            cfg["retrieval"]["use_reranker"] = False
+        import tempfile, yaml as _yaml
+        with tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False) as tmp:
+            _yaml.dump(cfg, tmp)
+            tmp_path = tmp.name
+        main(args.phase, tmp_path, skip_validate=args.no_validate)
+    else:
+        main(args.phase, args.config, skip_validate=args.no_validate)

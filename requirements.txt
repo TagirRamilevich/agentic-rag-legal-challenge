@@ -5,3 +5,7 @@ rank-bm25>=0.2.2
 PyYAML>=6.0
 Pillow>=10.0.0
 pytesseract>=0.3.10
+anthropic>=0.40.0
+
+# Optional: cross-encoder reranking (~500MB download on first run)
+# sentence-transformers>=2.6.0
