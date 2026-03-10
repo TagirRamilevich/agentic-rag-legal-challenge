@@ -1,0 +1,18 @@
+phase: warmup
+docs_dir: docs_corpus
+data_dir: data
+cache_dir: .cache
+submission_path: submission.json
+code_archive_path: code_archive.zip
+architecture_summary: "BM25 page-level retrieval with deterministic rule-based extraction. No LLM. Phase-scoped corpus, 1-based PDF pages."
+
+retrieval:
+  top_k_bm25: 20
+  neighbor_pages: true
+
+answering:
+  free_text_fallback: "There is no information on this question in the provided documents."
+
+ingestion:
+  ocr_dpi: 300
+  min_page_text_chars: 50

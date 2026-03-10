@@ -1,0 +1,38 @@
+# Secrets
+.env
+
+# Corpus and caches (can be large)
+docs_corpus/
+.cache/
+data/
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+.eggs/
+venv/
+.venv/
+env/
+*.egg
+
+# macOS
+.DS_Store
+
+# Output artefacts (generated, not source)
+submission.json
+code_archive.zip
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Jupyter
+.ipynb_checkpoints/
