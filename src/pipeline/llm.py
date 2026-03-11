@@ -1,6 +1,8 @@
 import json
 import os
 import re
+import time
+from datetime import date as _date
 from typing import Any, Optional
 
 from src.utils.number_parse import parse_number
@@ -14,9 +16,9 @@ _TYPE_CONFIG = {
     "boolean":  {"max_pages": 5, "chars": 3000, "max_tokens": 20},
     "number":   {"max_pages": 3, "chars": 3000, "max_tokens": 20},
     "date":     {"max_pages": 3, "chars": 2000, "max_tokens": 20},
-    "name":     {"max_pages": 4, "chars": 2000, "max_tokens": 50},
-    "names":    {"max_pages": 4, "chars": 2000, "max_tokens": 150},
-    "free_text":{"max_pages": 3, "chars": 1500, "max_tokens": 280},
+    "name":     {"max_pages": 4, "chars": 2500, "max_tokens": 50},
+    "names":    {"max_pages": 4, "chars": 2500, "max_tokens": 150},
+    "free_text":{"max_pages": 4, "chars": 3000, "max_tokens": 300},
 }
 _DEFAULT_CONFIG = {"max_pages": 3, "chars": 1200, "max_tokens": 256}
 
@@ -50,19 +52,46 @@ def _provider() -> Optional[str]:
     return None
 
 
-def _call(prompt: str, max_tokens: int = 256, use_strong_model: bool = False) -> Optional[str]:
+def _call(
+    prompt: str,
+    max_tokens: int = 256,
+    use_strong_model: bool = False,
+    t0: Optional[float] = None,
+) -> tuple[Optional[str], int, int, int, int, str]:
+    """
+    Call LLM and return (text, ttft_ms, total_ms, input_tokens, output_tokens, model_name).
+    ttft_ms is measured from t0 (if given) so it includes pre-LLM pipeline time.
+    Uses streaming on Anthropic for accurate TTFT measurement.
+    """
+    _t0 = t0 if t0 is not None else time.perf_counter()
     p = _provider()
+
     try:
         if p == "anthropic":
             import anthropic
             model = "claude-sonnet-4-6" if use_strong_model else "claude-haiku-4-5-20251001"
             client = anthropic.Anthropic()
-            msg = client.messages.create(
+            ttft_ms: Optional[int] = None
+            chunks: list[str] = []
+            input_tokens = 0
+            output_tokens = 0
+
+            with client.messages.stream(
                 model=model,
                 max_tokens=max_tokens,
                 messages=[{"role": "user", "content": prompt}],
-            )
-            return msg.content[0].text.strip()
+            ) as stream:
+                for chunk in stream.text_stream:
+                    if ttft_ms is None:
+                        ttft_ms = max(1, int((time.perf_counter() - _t0) * 1000))
+                    chunks.append(chunk)
+                final_msg = stream.get_final_message()
+                input_tokens = final_msg.usage.input_tokens
+                output_tokens = final_msg.usage.output_tokens
+
+            total_ms = max(1, int((time.perf_counter() - _t0) * 1000))
+            text = "".join(chunks).strip()
+            return text, ttft_ms or total_ms, total_ms, input_tokens, output_tokens, model
 
         if p == "openrouter":
             import requests as req
@@ -78,7 +107,9 @@ def _call(prompt: str, max_tokens: int = 256, use_strong_model: bool = False) ->
                 timeout=30,
             )
             r.raise_for_status()
-            return r.json()["choices"][0]["message"]["content"].strip()
+            text = r.json()["choices"][0]["message"]["content"].strip()
+            total_ms = max(1, int((time.perf_counter() - _t0) * 1000))
+            return text, total_ms, total_ms, 0, 0, model
 
         if p == "openai":
             import openai
@@ -89,11 +120,15 @@ def _call(prompt: str, max_tokens: int = 256, use_strong_model: bool = False) ->
                 max_tokens=max_tokens,
                 messages=[{"role": "user", "content": prompt}],
             )
-            return r.choices[0].message.content.strip()
+            text = r.choices[0].message.content.strip()
+            total_ms = max(1, int((time.perf_counter() - _t0) * 1000))
+            return text, total_ms, total_ms, 0, 0, model
 
     except Exception as e:
         print(f"  LLM error ({p}): {e}")
-    return None
+
+    total_ms = max(1, int((time.perf_counter() - _t0) * 1000))
+    return None, total_ms, total_ms, 0, 0, "unknown"
 
 
 _TYPE_INSTRUCTIONS = {
@@ -104,20 +139,20 @@ _TYPE_INSTRUCTIONS = {
         "If not found in context: null"
     ),
     "bool": (
-        "Return ONLY the word true or the word false (lowercase, nothing else). "
-        "true = yes / granted / approved / allowed / upheld / correct / same. "
-        "false = no / dismissed / denied / rejected / refused / different / earlier / later. "
-        "Look for court rulings, comparisons, or factual statements. "
-        "Make your best determination from the available context. "
-        "Only return null if the topic is completely absent from the context."
+        "Return ONLY the word true, false, or null (lowercase, nothing else). "
+        "true = yes / granted / approved / allowed / upheld / same. "
+        "false = no / dismissed / denied / rejected / refused / different. "
+        "null = the context does not clearly and directly answer this yes/no question. "
+        "IMPORTANT: Only return true or false if you find CLEAR, DIRECT evidence. "
+        "When in doubt or if the topic is absent, return null."
     ),
     "boolean": (
-        "Return ONLY the word true or the word false (lowercase, nothing else). "
-        "true = yes / granted / approved / allowed / upheld / correct / same. "
-        "false = no / dismissed / denied / rejected / refused / different / earlier / later. "
-        "Look for court rulings, comparisons, or factual statements. "
-        "Make your best determination from the available context. "
-        "Only return null if the topic is completely absent from the context."
+        "Return ONLY the word true, false, or null (lowercase, nothing else). "
+        "true = yes / granted / approved / allowed / upheld / same. "
+        "false = no / dismissed / denied / rejected / refused / different. "
+        "null = the context does not clearly and directly answer this yes/no question. "
+        "IMPORTANT: Only return true or false if you find CLEAR, DIRECT evidence. "
+        "When in doubt or if the topic is absent, return null."
     ),
     "date": (
         "Return ONLY a date in YYYY-MM-DD format. "
@@ -138,9 +173,12 @@ _TYPE_INSTRUCTIONS = {
         "If genuinely not found: null"
     ),
     "free_text": (
-        f"Answer in 1–3 sentences, maximum {FREE_TEXT_MAX} characters total. "
-        "Use ONLY information from the provided context. Do not hallucinate. "
-        f"If the answer is absent: {FREE_TEXT_FALLBACK}"
+        f"Answer in 1-3 clear, precise sentences using ONLY the provided context. "
+        f"Maximum {FREE_TEXT_MAX} characters. Do not hallucinate or speculate. "
+        "Be specific: include relevant legal names, article numbers, amounts, dates. "
+        "After your answer write exactly: SOURCES: then comma-separated 0-based "
+        "block numbers you used (e.g. SOURCES: 0,2). "
+        f"If the answer is absent from context, write only: {FREE_TEXT_FALLBACK}"
     ),
 }
 
@@ -156,6 +194,17 @@ def _build_prompt(question: str, answer_type: str, context: str) -> str:
     )
 
 
+def _parse_free_text_sources(raw: str, num_pages: int) -> tuple[str, list[int]]:
+    """Parse 'SOURCES: 0,1,2' suffix from free_text response. Returns (answer, page_indices)."""
+    m = re.search(r"\bSOURCES?:\s*([\d,\s]+)\s*$", raw.strip(), re.IGNORECASE)
+    indices: list[int] = []
+    if m:
+        idx_strs = re.findall(r"\d+", m.group(1))
+        indices = [int(i) for i in idx_strs if int(i) < num_pages]
+        raw = raw[: m.start()].strip()
+    return raw[:FREE_TEXT_MAX], indices
+
+
 def _parse(raw: str, answer_type: str) -> Any:
     raw = raw.strip()
     if not raw or raw.lower() in ("null", "none", "n/a"):
@@ -167,13 +216,14 @@ def _parse(raw: str, answer_type: str) -> Any:
             return True
         if low in ("false", "no"):
             return False
+        # Only infer from regex if strong signal; otherwise null
         t = len(_TRUE_RE.findall(raw))
         f = len(_FALSE_RE.findall(raw))
-        if t > f:
+        if t > f + 1:  # require margin of 2+
             return True
-        if f > t:
+        if f > t + 1:
             return False
-        return None
+        return None  # ambiguous → null
 
     if answer_type == "number":
         return parse_number(raw)
@@ -187,7 +237,6 @@ def _parse(raw: str, answer_type: str) -> Any:
         return None
 
     if answer_type == "names":
-        # Detect "cannot find" responses before trying to parse
         if _NOT_FOUND_RE.search(raw) and not raw.strip().startswith("["):
             return None
         clean = re.sub(r"```(?:json)?\s*|\s*```", "", raw).strip()
@@ -198,12 +247,10 @@ def _parse(raw: str, answer_type: str) -> Any:
                 return items or None
         except json.JSONDecodeError:
             pass
-        # Split only if it looks like a list (contains quotes or short items)
         if '"' in clean or clean.startswith("["):
-            items = [x.strip().strip("\"'[] ") for x in re.split(r'[,\n]', clean)]
+            items = [x.strip().strip("\"'[] ") for x in re.split(r"[,\n]", clean)]
             items = [x for x in items if x and len(x) < 150 and not _NOT_FOUND_RE.search(x)]
             return items or None
-        # Single value — treat as a one-item list
         if len(clean) < 150 and not _NOT_FOUND_RE.search(clean):
             return [clean.strip("\"' ")]
         return None
@@ -216,7 +263,6 @@ def _parse(raw: str, answer_type: str) -> Any:
 
     if answer_type == "free_text":
         text = raw[:FREE_TEXT_MAX]
-        # If LLM starts with fallback then keeps writing, truncate at fallback
         if text.startswith(FREE_TEXT_FALLBACK[:30]):
             return FREE_TEXT_FALLBACK
         return text
@@ -224,28 +270,135 @@ def _parse(raw: str, answer_type: str) -> Any:
     return raw or None
 
 
-def _find_source_pages(answer: Any, pages: list[dict], answer_type: str = "") -> list[dict]:
-    """Return all context pages as sources.
+# ---------------------------------------------------------------------------
+# Smart source-page selection
+# ---------------------------------------------------------------------------
 
-    With grounding F-beta β=2.5, recall is heavily weighted over precision.
-    Returning all context pages maximises recall (gold page is almost always
-    in the context we sent to the LLM) at a modest precision cost.
-    Narrowing to 1-2 pages risks picking the wrong page → recall=0 → G≈0.
+_MONTHS_LONG = [
+    "January", "February", "March", "April", "May", "June",
+    "July", "August", "September", "October", "November", "December",
+]
+_MONTHS_SHORT = [
+    "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+    "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+]
+
+
+def _date_search_variants(iso: str) -> list[str]:
+    try:
+        d = _date.fromisoformat(iso)
+        return [
+            iso,
+            f"{d.day} {_MONTHS_LONG[d.month - 1]} {d.year}",
+            f"{d.day} {_MONTHS_SHORT[d.month - 1]} {d.year}",
+            f"{_MONTHS_LONG[d.month - 1]} {d.day}, {d.year}",
+            f"{d.day:02d}/{d.month:02d}/{d.year}",
+            f"{d.year}/{d.month:02d}/{d.day:02d}",
+        ]
+    except Exception:
+        return [iso]
+
+
+def _number_search_variants(v: Any) -> list[str]:
+    try:
+        n = float(v)
+        if n == int(n):
+            i = int(n)
+            # Small numbers (< 100) appear too frequently; rely on top-page fallback
+            if i < 100:
+                return []
+            return [str(i), f"{i:,}"]
+        return [str(n)]
+    except Exception:
+        return [str(v)]
+
+
+def _find_source_pages(answer: Any, pages: list[dict], answer_type: str = "") -> list[dict]:
+    """Return pages that contain evidence for the answer (smart text matching).
+
+    Strategy:
+    - For deterministic types: search answer value in page text → return matching pages.
+    - For boolean: return top-1 page (can't text-match true/false directly).
+    - For free_text: handled by LLM citation; this function receives pre-filtered pages.
+    - Fallback: top-1 page if no match found (never return empty for non-null answers).
     """
     if answer is None or not pages:
         return []
-    return pages
 
+    if answer_type in ("bool", "boolean"):
+        # For comparison questions involving multiple docs: include 1 page per doc
+        # (gold typically cites 1 page from each relevant document)
+        seen_docs: dict[str, dict] = {}
+        for p in pages:
+            did = p["doc_id"]
+            if did not in seen_docs:
+                seen_docs[did] = p
+            if len(seen_docs) >= 2:
+                break
+        # If multiple docs represented, return 1 page per doc; else top-1
+        if len(seen_docs) >= 2:
+            return list(seen_docs.values())
+        return pages[:1]
+
+    if answer_type == "free_text":
+        # free_text sources are resolved from LLM citation in answer_with_llm
+        return pages[:2]
+
+    # Build search terms
+    search_terms: list[str] = []
+    if answer_type == "number":
+        search_terms = _number_search_variants(answer)
+    elif answer_type == "date":
+        search_terms = _date_search_variants(str(answer))
+    elif answer_type == "name":
+        val = str(answer).strip()
+        if val:
+            search_terms = [val]
+    elif answer_type == "names":
+        if isinstance(answer, list):
+            search_terms = [str(n).strip() for n in answer if n]
+        else:
+            s = str(answer).strip()
+            if s:
+                search_terms = [s]
+
+    if not search_terms:
+        return pages[:1]
+
+    matching: list[dict] = []
+    for page in pages:
+        text = page["text"]
+        for term in search_terms:
+            if re.search(re.escape(term), text, re.IGNORECASE):
+                matching.append(page)
+                break
+
+    return matching if matching else pages[:1]
+
+
+# ---------------------------------------------------------------------------
+# Main entry point
+# ---------------------------------------------------------------------------
 
 def answer_with_llm(
-    question_data: dict, pages: list[dict]
-) -> tuple[Any, list[dict]]:
+    question_data: dict,
+    pages: list[dict],
+    t0: Optional[float] = None,
+) -> tuple[Any, list[dict], int, int, int, int, str]:
+    """
+    Returns: (answer, used_pages, ttft_ms, total_ms, input_tokens, output_tokens, model_name)
+    t0: perf_counter timestamp from before retrieval (for accurate TTFT measurement).
+    """
     answer_type = question_data.get("answer_type", "free_text")
     question = question_data.get("question", "")
 
+    _t0 = t0 if t0 is not None else time.perf_counter()
+
     if _provider() is None:
         from src.pipeline.answer import answer_question
-        return answer_question(question_data, pages)
+        ans, used = answer_question(question_data, pages)
+        elapsed = max(1, int((time.perf_counter() - _t0) * 1000))
+        return ans, used, elapsed, elapsed, 0, 0, "deterministic"
 
     cfg = _TYPE_CONFIG.get(answer_type, _DEFAULT_CONFIG)
     max_pages = cfg["max_pages"]
@@ -254,55 +407,85 @@ def answer_with_llm(
 
     context_parts: list[str] = []
     context_pages: list[dict] = []
-    for page in pages[:max_pages]:
+    for i, page in enumerate(pages[:max_pages]):
         text = page["text"].strip()
         if not text:
             continue
-        context_parts.append(f"[{page['doc_id']} p.{page['page_number']}]\n{text[:chars_per_page]}")
+        context_parts.append(
+            f"[BLOCK {i}: {page['doc_id']} p.{page['page_number']}]\n{text[:chars_per_page]}"
+        )
         context_pages.append(page)
 
     if not context_parts:
+        elapsed = max(1, int((time.perf_counter() - _t0) * 1000))
         if answer_type == "free_text":
-            return FREE_TEXT_FALLBACK, []
-        return None, []
+            return FREE_TEXT_FALLBACK, [], elapsed, elapsed, 0, 0, "none"
+        return None, [], elapsed, elapsed, 0, 0, "none"
 
     context = "\n\n---\n\n".join(context_parts)
     prompt = _build_prompt(question, answer_type, context)
-    use_strong = answer_type == "free_text"
-    raw = _call(prompt, max_tokens=max_tokens, use_strong_model=use_strong)
+    # Use Haiku for all types (fast TTFT → F=1.05 bonus)
+    # Sonnet is ~3× slower to first token; Haiku is sufficient for structured extraction
+    use_strong = False
+
+    raw, ttft_ms, total_ms, in_tok, out_tok, model = _call(
+        prompt, max_tokens=max_tokens, use_strong_model=use_strong, t0=_t0
+    )
 
     if raw is None:
         from src.pipeline.answer import answer_question
-        return answer_question(question_data, pages)
+        ans, used = answer_question(question_data, pages)
+        elapsed = max(1, int((time.perf_counter() - _t0) * 1000))
+        return ans, used, elapsed, elapsed, 0, 0, "deterministic-fallback"
+
+    # For free_text: parse LLM-cited source blocks
+    if answer_type == "free_text":
+        text, cited_indices = _parse_free_text_sources(raw, len(context_pages))
+        answer = _parse(text, answer_type)
+        if answer == FREE_TEXT_FALLBACK or answer is None:
+            total_ms2 = max(1, int((time.perf_counter() - _t0) * 1000))
+            return FREE_TEXT_FALLBACK if answer_type == "free_text" else None, [], ttft_ms, total_ms2, in_tok, out_tok, model
+        # Use cited pages if valid; fallback to top-2
+        if cited_indices:
+            used_pages = [context_pages[i] for i in cited_indices]
+        else:
+            used_pages = context_pages[:2]
+        total_ms2 = max(1, int((time.perf_counter() - _t0) * 1000))
+        return answer, used_pages, ttft_ms, total_ms2, in_tok, out_tok, model
 
     answer = _parse(raw, answer_type)
 
-    # Retry with more pages if first attempt returns null (Habr: reparser fallback)
-    # Only for types where extra context clearly helps; bool/name can hallucinate on retry
+    # Retry with more pages if first attempt returns null
     if answer is None and answer_type in ("number", "date", "names") and len(pages) > max_pages:
         retry_pages = min(max_pages + 3, len(pages))
         retry_parts: list[str] = []
         retry_context_pages: list[dict] = []
-        for page in pages[:retry_pages]:
+        for i, page in enumerate(pages[:retry_pages]):
             text = page["text"].strip()
             if not text:
                 continue
-            retry_parts.append(f"[{page['doc_id']} p.{page['page_number']}]\n{text[:chars_per_page]}")
+            retry_parts.append(
+                f"[BLOCK {i}: {page['doc_id']} p.{page['page_number']}]\n{text[:chars_per_page]}"
+            )
             retry_context_pages.append(page)
         if len(retry_parts) > len(context_parts):
             retry_context = "\n\n---\n\n".join(retry_parts)
             retry_prompt = _build_prompt(question, answer_type, retry_context)
-            raw2 = _call(retry_prompt, max_tokens=max_tokens)
+            raw2, ttft_ms2, total_ms2, in_tok2, out_tok2, model2 = _call(
+                retry_prompt, max_tokens=max_tokens, t0=_t0
+            )
             if raw2 is not None:
-                answer = _parse(raw2, answer_type)
-                if answer is not None:
+                answer2 = _parse(raw2, answer_type)
+                if answer2 is not None:
+                    answer = answer2
                     context_pages = retry_context_pages
+                    in_tok += in_tok2
+                    out_tok += out_tok2
+
+    total_ms_final = max(1, int((time.perf_counter() - _t0) * 1000))
 
     if answer is None:
-        return None, []
-
-    if answer_type == "free_text" and answer == FREE_TEXT_FALLBACK:
-        return answer, []
+        return None, [], ttft_ms, total_ms_final, in_tok, out_tok, model
 
     source_pages = _find_source_pages(answer, context_pages, answer_type)
-    return answer, source_pages
+    return answer, source_pages, ttft_ms, total_ms_final, in_tok, out_tok, model

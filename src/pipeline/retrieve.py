@@ -183,23 +183,26 @@ def retrieve_pages(
     # Priority pages to prepend (appear first in returned list for the fallback reranker)
     priority: list[int] = []
 
-    # Law-identity questions: include p.1 of the top matching document
+    # Law-identity questions: include p.1-3 of the top matching document
     # (title pages always have the law number and enactment date)
+    # Tag with _priority to prevent cross-encoder from pushing them out.
     if _LAW_IDENTITY_RE.search(question) and main_indices:
         top_doc_id = pages[main_indices[0]]["doc_id"]
         for pg in (1, 2, 3):
             j = doc_page_index.get((top_doc_id, pg))
             if j is not None:
+                tagged = dict(pages[j])
+                tagged["_priority"] = True
                 priority.append(j)
-                if j not in result:
-                    result[j] = pages[j]
+                result[j] = tagged
+                if j not in top_indices:
                     top_indices.append(j)
 
-    # Article-specific questions: search for that article within the top doc
+    # Article-specific questions: search for that article within the top doc.
+    # Tag with _priority so reranker pins them (cross-encoder can misrank article pages).
     article_m = _ARTICLE_RE.search(question)
     if article_m and main_indices:
         article_num = article_m.group(1)
-        # Match "Article 14" OR "14." OR "14(" at start/middle of line (numbered sections)
         article_pat = re.compile(
             rf"(?:\bArticle\s+{article_num}\b|(?:^|\n)\s*{article_num}[.(])",
             re.IGNORECASE | re.MULTILINE,
@@ -207,12 +210,59 @@ def retrieve_pages(
         top_doc_id = pages[main_indices[0]]["doc_id"]
         for idx, p in enumerate(pages):
             if p["doc_id"] == top_doc_id and article_pat.search(p["text"]):
+                tagged = dict(p)
+                tagged["_priority"] = True
                 priority.append(idx)
-                if idx not in result:
-                    result[idx] = pages[idx]
+                result[idx] = tagged
+                if idx not in top_indices:
                     top_indices.append(idx)
                 if len(priority) >= 5:
                     break
+
+    # Keyword-within-document search: find pages in top doc that contain
+    # content words from the question (for cases where TOC pages dominate BM25).
+    # Only run when no article-specific match and the top doc seems law-like.
+    if not article_m and main_indices:
+        # Extract content terms: non-stopword, non-case-ref, alphabetic tokens >= 4 chars
+        q_tokens = [
+            t for t in re.findall(r"[a-zA-Z]{4,}", question.lower())
+            if t not in _STOPWORDS
+        ]
+        if len(q_tokens) >= 2:
+            top_doc_id = pages[main_indices[0]]["doc_id"]
+            # Check if top doc is a multi-page law/legal doc
+            doc_pages_count = sum(1 for p in pages if p["doc_id"] == top_doc_id)
+            if doc_pages_count >= 4:
+                # Find pages in this doc that match multiple query terms
+                for idx, p in enumerate(pages):
+                    if p["doc_id"] == top_doc_id:
+                        text_lower = p["text"].lower()
+                        matches = sum(1 for t in q_tokens if t in text_lower)
+                        if matches >= max(2, len(q_tokens) // 2):
+                            if idx not in result:
+                                result[idx] = pages[idx]
+                                top_indices.append(idx)
+
+    # Case-specific questions: for short case documents (<= 5 pages),
+    # always include all pages when the question references the case number.
+    # Tag them with _priority so the reranker won't drop them.
+    case_refs = _CASE_RE.findall(question)
+    for case_ref in case_refs[:2]:
+        # Find doc with this case ref in first page text
+        for idx, p in enumerate(pages):
+            if p["page_number"] == 1 and case_ref.replace(" ", "") in p["text"].replace(" ", ""):
+                case_doc_id = p["doc_id"]
+                case_pages_list = [j for j, pp in enumerate(pages) if pp["doc_id"] == case_doc_id]
+                if len(case_pages_list) <= 6:  # small case doc → include all pages
+                    for j in case_pages_list:
+                        # Tag with _priority so reranker pins them
+                        tagged = dict(pages[j])
+                        tagged["_priority"] = True
+                        priority.append(j)
+                        result[j] = tagged
+                        if j not in top_indices:
+                            top_indices.append(j)
+                break
 
     if add_neighbors:
         for i in list(top_indices[:8]):
@@ -225,4 +275,4 @@ def retrieve_pages(
 
     # Build final ordered list: priority pages first, then remaining
     all_indices = list(dict.fromkeys(priority + list(result.keys())))
-    return [pages[i] for i in all_indices if i in result]
+    return [result[i] for i in all_indices if i in result]

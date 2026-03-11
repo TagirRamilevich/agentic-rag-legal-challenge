@@ -43,10 +43,21 @@ def rerank_pages(
             return _apply_diversity(pages, top_k, max_per_doc)
         return pages[:top_k]
 
+    # Limit reranker input: too many pages → slow CPU inference
+    # Keep at most 3×top_k pages for scoring; priority pages always included first
+    priority_pages = [p for p in pages if p.get("_priority")]
+    non_priority = [p for p in pages if not p.get("_priority")]
+    max_non_priority = max(top_k * 3, 12) - len(priority_pages)
+    input_pages = priority_pages + non_priority[:max_non_priority]
+
     m = _model(model_name)
-    pairs = [(query, p["text"][:512]) for p in pages]
-    scores = m.predict(pairs, show_progress_bar=False)
-    ranked = [page for _, page in sorted(zip(scores, pages), key=lambda x: -float(x[0]))]
+    pairs = [(query, p["text"][:512]) for p in input_pages]
+    scores = list(m.predict(pairs, show_progress_bar=False))
+    # Priority pages are pinned regardless of score
+    for i, page in enumerate(input_pages):
+        if page.get("_priority"):
+            scores[i] = 1000.0
+    ranked = [page for _, page in sorted(zip(scores, input_pages), key=lambda x: -float(x[0]))]
 
     if max_per_doc > 0:
         return _apply_diversity(ranked, top_k, max_per_doc)

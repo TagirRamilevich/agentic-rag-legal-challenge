@@ -97,11 +97,12 @@ def main(use_llm: bool = True, use_rerank: bool = True, limit: int = 0, verbose:
             final = retrieved[:5]
 
         if use_llm:
-            answer, used_pages = answer_with_llm(q, final)
+            answer, used_pages, ttft_ms, total_ms_q, *_ = answer_with_llm(q, final, t0=t0)
         else:
             answer, used_pages = answer_question(q, final)
+            ttft_ms = int((time.perf_counter() - t0) * 1000)
+            total_ms_q = ttft_ms
 
-        ttft_ms = int((time.perf_counter() - t0) * 1000)
         ttfts.append(ttft_ms)
 
         type_total[answer_type] += 1
@@ -123,7 +124,7 @@ def main(use_llm: bool = True, use_rerank: bool = True, limit: int = 0, verbose:
         if verbose:
             ans_str = str(answer)[:80] if answer is not None else "NULL"
             doc = used_pages[0]["doc_id"][:20] + "..." if used_pages else "—"
-            print(f"  [{answer_type:8s}] {q['question'][:55]:<55s} → {ans_str} | src:{doc} {ttft_ms}ms")
+            print(f"  [{answer_type:8s}] {q['question'][:55]:<55s} → {ans_str} | src:{doc} ttft={ttft_ms}ms total={total_ms_q}ms")
 
     n = len(questions)
     avg_ttft = sum(ttfts) / n if ttfts else 0

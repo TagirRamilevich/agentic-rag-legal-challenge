@@ -1,14 +1,19 @@
 import time
 
-MODEL_NAME = "bm25+rules-v1"
+MODEL_NAME = "bm25+rerank+claude"
 
 
-def build_telemetry(start_time: float, used_pages: list[dict]) -> dict:
-    elapsed_ms = max(1, int((time.perf_counter() - start_time) * 1000))
-
+def build_telemetry(
+    used_pages: list[dict],
+    ttft_ms: int,
+    total_ms: int,
+    input_tokens: int = 0,
+    output_tokens: int = 0,
+    model_name: str = "",
+) -> dict:
+    """Build submission telemetry dict from timing and retrieval data."""
     by_doc: dict[str, set] = {}
     for page in used_pages:
-        # Platform expects doc_id without file extension (e.g. "abc123", not "abc123.pdf")
         doc_id = page["doc_id"]
         if doc_id.endswith(".pdf"):
             doc_id = doc_id[:-4]
@@ -21,11 +26,11 @@ def build_telemetry(start_time: float, used_pages: list[dict]) -> dict:
 
     return {
         "timing": {
-            "ttft_ms": elapsed_ms,
+            "ttft_ms": max(1, ttft_ms),
             "tpot_ms": 0,
-            "total_time_ms": elapsed_ms,
+            "total_time_ms": max(1, total_ms),
         },
         "retrieval": {"retrieved_chunk_pages": retrieved_chunk_pages},
-        "usage": {"input_tokens": 0, "output_tokens": 0},
-        "model_name": MODEL_NAME,
+        "usage": {"input_tokens": input_tokens, "output_tokens": output_tokens},
+        "model_name": model_name or MODEL_NAME,
     }

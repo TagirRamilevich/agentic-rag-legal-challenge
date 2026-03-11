@@ -124,20 +124,23 @@ def main(phase: str, config_path: str = "configs/rag.yaml", skip_validate: bool 
             final_pages = retrieved[:top_k_rerank]
 
         if use_llm:
-            answer, used_pages = answer_with_llm(q, final_pages)
+            answer, used_pages, ttft_ms, total_ms, in_tok, out_tok, model = answer_with_llm(q, final_pages, t0=t0)
             llm_count += 1
         else:
             answer, used_pages = answer_question(q, final_pages)
+            elapsed = max(1, int((time.perf_counter() - t0) * 1000))
+            ttft_ms, total_ms, in_tok, out_tok, model = elapsed, elapsed, 0, 0, "deterministic"
 
         if answer is None:
             null_count += 1
 
-        telemetry = build_telemetry(t0, used_pages)
+        telemetry = build_telemetry(used_pages, ttft_ms=ttft_ms, total_ms=total_ms,
+                                    input_tokens=in_tok, output_tokens=out_tok, model_name=model)
         q_id = q.get("question_id") or q.get("id", "")
         answers.append({"question_id": q_id, "answer": answer, "telemetry": telemetry})
 
         if i % 10 == 0 or i == len(questions):
-            print(f"      {i}/{len(questions)} done  (last ttft {telemetry['timing']['ttft_ms']}ms)")
+            print(f"      {i}/{len(questions)} done  (ttft {ttft_ms}ms total {total_ms}ms  model={model})")
 
     print(f"      null answers: {null_count}/{len(questions)}, llm calls: {llm_count}")
 
