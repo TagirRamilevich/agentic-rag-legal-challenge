@@ -139,6 +139,7 @@ def extract_date(
                                 best_score = score
                                 best_date = date_str
                                 best_page = page
+                            break  # take most specific pattern first
                     except Exception:
                         pass
 

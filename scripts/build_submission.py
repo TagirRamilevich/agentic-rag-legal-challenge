@@ -111,7 +111,8 @@ def main(phase: str, config_path: str = "configs/rag.yaml", skip_validate: bool 
             null_count += 1
 
         telemetry = build_telemetry(t0, used_pages)
-        answers.append({"question_id": q["question_id"], "answer": answer, "telemetry": telemetry})
+        q_id = q.get("question_id") or q.get("id", "")
+        answers.append({"question_id": q_id, "answer": answer, "telemetry": telemetry})
 
         if i % 10 == 0 or i == len(questions):
             print(f"      {i}/{len(questions)} done  (last ttft {telemetry['timing']['ttft_ms']}ms)")

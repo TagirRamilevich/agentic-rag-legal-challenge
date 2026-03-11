@@ -7,8 +7,8 @@ from src.utils.number_parse import parse_number
 
 FREE_TEXT_FALLBACK = "There is no information on this question in the provided documents."
 FREE_TEXT_MAX = 280
-CONTEXT_CHARS_PER_PAGE = 2500
-MAX_CONTEXT_PAGES = 5
+CONTEXT_CHARS_PER_PAGE = 1500
+MAX_CONTEXT_PAGES = 3
 
 
 def _provider() -> Optional[str]:
@@ -135,13 +135,14 @@ def _parse(raw: str, answer_type: str) -> Any:
         return None
 
     if answer_type == "names":
+        clean = re.sub(r"```(?:json)?\s*|\s*```", "", raw).strip()
         try:
-            parsed = json.loads(raw)
+            parsed = json.loads(clean)
             if isinstance(parsed, list):
                 return [str(x).strip() for x in parsed if x] or None
         except json.JSONDecodeError:
             pass
-        items = [x.strip().strip("\"'") for x in re.split(r"[,\n;]", raw) if x.strip()]
+        items = [x.strip().strip("\"'[]") for x in re.split(r"[,\n;]", clean) if x.strip().strip("\"'[]")]
         return items or None
 
     if answer_type == "name":
