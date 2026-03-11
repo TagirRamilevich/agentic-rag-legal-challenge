@@ -24,6 +24,10 @@ def build_doc_routing_index(pages: list[dict]) -> dict:
     _law_name_p = re.compile(
         r"\b((?:[A-Z][a-z]+\s+){1,5}(?:Law|Regulations?|Rules?)(?:\s+\d{4})?)\b"
     )
+    # Also match ALL-CAPS law names from title pages (e.g. "OPERATING LAW")
+    _law_name_caps_p = re.compile(
+        r"\b((?:[A-Z]{3,}[ \t]+){1,5}(?:LAW|REGULATIONS?|RULES?))\b"
+    )
 
     for p in pages:
         if p["page_number"] != 1:
@@ -47,6 +51,11 @@ def build_doc_routing_index(pages: list[dict]) -> dict:
             law_norm = law.strip()
             if len(law_norm) > 8 and law_norm not in law_to_doc:
                 law_to_doc[law_norm] = doc_id
+        # Also extract ALL-CAPS law names and store as Title Case
+        for law in _law_name_caps_p.findall(text):
+            law_title = law.strip().title()  # "OPERATING LAW" → "Operating Law"
+            if len(law_title) > 8 and law_title not in law_to_doc:
+                law_to_doc[law_title] = doc_id
 
     index = {"case": case_to_doc, "law": law_to_doc}
     _DOC_ROUTE_CACHE[key] = index
@@ -285,6 +294,9 @@ def retrieve_pages(
         if case_norm in doc_route["case"]:
             routed_doc_ids.add(doc_route["case"][case_norm])
     for law_ref in _LAW_REF_RE.findall(question):
+        # Skip overly broad matches like "DIFC Law" that match everything
+        if len(law_ref) < 10 and not re.match(r"Law No\.", law_ref, re.IGNORECASE):
+            continue
         for key, doc_id in doc_route["law"].items():
             if law_ref.lower() in key.lower() or key.lower() in law_ref.lower():
                 routed_doc_ids.add(doc_id)
@@ -517,11 +529,17 @@ def retrieve_pages(
                             if idx2 not in top_indices:
                                 top_indices.append(idx2)
 
-    # Law-identity questions: include p.1-3 of the top matching document.
+    # Law-identity questions: include p.1 of the top matching document.
     # Skip when article search already found specific pages (article is more precise).
+    # Only for actual metadata questions (law number, title, enactment date).
     # (title pages always have the law number and enactment date)
     # Tag with _priority to prevent cross-encoder from pushing them out.
-    if _LAW_IDENTITY_RE.search(question) and main_indices and not article_m:
+    _is_metadata_q = bool(re.search(
+        r"\b(what is the (?:law )?number|what is the title|official (?:law )?number|"
+        r"enacted\b|commencement date|date (?:of|was) .{0,20}enacted|cover page)\b",
+        question, re.IGNORECASE,
+    ))
+    if _is_metadata_q and main_indices and not article_m:
         # Find the best-matching doc: prefer docs whose p.1 title closely matches the law name
         # from the question (avoids picking the wrong law when many laws match BM25).
         top_doc_id = pages[main_indices[0]]["doc_id"]
@@ -550,7 +568,7 @@ def retrieve_pages(
                             best_doc2 = p["doc_id"]
             if best_doc2:
                 top_doc_id = best_doc2
-        for pg in (1, 2, 3):
+        for pg in (1, 2):
             j = doc_page_index.get((top_doc_id, pg))
             if j is not None:
                 tagged = dict(pages[j])
@@ -630,22 +648,90 @@ def retrieve_pages(
     # always include all pages when the question references the case number.
     # Tag them with _priority so the reranker won't drop them.
     case_refs = _CASE_RE.findall(question)
+    # Extract question content words for case page relevance scoring
+    _case_q_words = set(
+        w.lower() for w in re.findall(r"[a-zA-Z]{4,}", question)
+        if w.lower() not in _STOPWORDS
+    )
     for case_ref in case_refs[:2]:
         # Find doc with this case ref in first page text
         for idx, p in enumerate(pages):
             if p["page_number"] == 1 and case_ref.replace(" ", "") in p["text"].replace(" ", ""):
                 case_doc_id = p["doc_id"]
                 case_pages_list = [j for j, pp in enumerate(pages) if pp["doc_id"] == case_doc_id]
-                if len(case_pages_list) <= 6:  # small case doc → include all pages
+                if len(case_pages_list) <= 6:
+                    # Small case doc: include all pages as priority
                     for j in case_pages_list:
-                        # Tag with _priority so reranker pins them
                         tagged = dict(pages[j])
                         tagged["_priority"] = True
                         priority.append(j)
                         result[j] = tagged
                         if j not in top_indices:
                             top_indices.append(j)
+                else:
+                    # Larger case doc: include p.1 as priority, add keyword-matching pages
+                    j0 = doc_page_index.get((case_doc_id, 1))
+                    if j0 is not None:
+                        tagged = dict(pages[j0])
+                        tagged["_priority"] = True
+                        priority.append(j0)
+                        result[j0] = tagged
+                        if j0 not in top_indices:
+                            top_indices.append(j0)
+                    # Find pages matching question keywords (e.g. "conclusion", "ordered")
+                    for j in case_pages_list:
+                        page_text_l = pages[j]["text"].lower()
+                        kw_matches = sum(1 for w in _case_q_words if w in page_text_l)
+                        if kw_matches >= 2:
+                            if j not in result:
+                                result[j] = pages[j]
+                                top_indices.append(j)
                 break
+
+    # Fine/penalty questions: find the schedule page with fine amounts
+    if re.search(r"\b(maximum fine|penalty|fine for|liable to a fine)\b", question, re.IGNORECASE):
+        # For the top-matching law doc, find schedule/fine pages
+        if main_indices:
+            top_doc_id = pages[main_indices[0]]["doc_id"]
+            # Try routed doc first
+            for ref in _LAW_REF_RE.findall(question):
+                for key, doc_id in doc_route["law"].items():
+                    if ref.lower() in key.lower() or key.lower() in ref.lower():
+                        top_doc_id = doc_id
+                        break
+            _fine_pat = re.compile(r"\bschedule\b.*\bfine|fine.*\bschedule\b|\bmaximum fine\b|\bfines and fees\b", re.IGNORECASE)
+            for idx2, p2 in enumerate(pages):
+                if p2["doc_id"] == top_doc_id and _fine_pat.search(p2["text"]):
+                    if idx2 not in result or not result.get(idx2, {}).get("_priority"):
+                        tagged2 = dict(p2)
+                        tagged2["_priority"] = True
+                        priority.append(idx2)
+                        result[idx2] = tagged2
+                        if idx2 not in top_indices:
+                            top_indices.append(idx2)
+
+    # Cross-document search: for "which laws were amended by X" questions,
+    # find all docs whose title page (p.1) mentions the amending law.
+    _amend_q = re.search(
+        r"\b(?:amended|enacted|modified|introduced)\s+by\s+(.{10,60})\b",
+        question, re.IGNORECASE,
+    )
+    if not _amend_q:
+        _amend_q = re.search(
+            r"\b(DIFC Law No\.\s*\d+\s+of\s+\d{4})\b", question, re.IGNORECASE,
+        )
+    if _amend_q and re.search(r"\bwhich\b|\bwhat\b|\blist\b", question, re.IGNORECASE):
+        amend_ref = _amend_q.group(1).strip().lower()
+        # Search all doc title pages for this reference
+        for idx, p in enumerate(pages):
+            if p["page_number"] == 1 and amend_ref in p["text"].lower():
+                if idx not in result:
+                    tagged = dict(pages[idx])
+                    tagged["_priority"] = True
+                    priority.append(idx)
+                    result[idx] = tagged
+                    if idx not in top_indices:
+                        top_indices.append(idx)
 
     if add_neighbors:
         for i in list(top_indices[:8]):

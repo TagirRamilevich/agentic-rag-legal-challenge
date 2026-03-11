@@ -17,11 +17,11 @@ FREE_TEXT_MAX = 280
 _TYPE_CONFIG = {
     "bool":     {"max_pages": 5, "chars": 2000, "max_tokens": 30},
     "boolean":  {"max_pages": 5, "chars": 2000, "max_tokens": 30},
-    "number":   {"max_pages": 3, "chars": 1000, "max_tokens": 30},
-    "date":     {"max_pages": 3, "chars": 1000, "max_tokens": 30},
-    "name":     {"max_pages": 4, "chars": 1200, "max_tokens": 60},
-    "names":    {"max_pages": 4, "chars": 1500, "max_tokens": 160},
-    "free_text":{"max_pages": 3, "chars": 1500, "max_tokens": 350},
+    "number":   {"max_pages": 4, "chars": 1200, "max_tokens": 30},
+    "date":     {"max_pages": 4, "chars": 1200, "max_tokens": 30},
+    "name":     {"max_pages": 4, "chars": 1500, "max_tokens": 60},
+    "names":    {"max_pages": 4, "chars": 1800, "max_tokens": 160},
+    "free_text":{"max_pages": 4, "chars": 2000, "max_tokens": 350},
 }
 _DEFAULT_CONFIG = {"max_pages": 3, "chars": 1200, "max_tokens": 256}
 
@@ -208,11 +208,11 @@ _TYPE_INSTRUCTIONS = {
         f"Answer in 1-3 precise sentences using ONLY the provided context. "
         f"Maximum {FREE_TEXT_MAX} characters. Be concise but complete. "
         "Include specific details: legal names, article/section numbers, dates, amounts. "
-        "Do NOT include information that is not stated in the context. "
-        "Do NOT speculate or provide general legal knowledge. "
+        "Do NOT speculate or provide general legal knowledge beyond what is stated. "
+        "Look carefully through ALL context blocks for relevant information before concluding it is absent. "
         "After your answer write exactly: SOURCES: then comma-separated 0-based "
         "block numbers you used (e.g. SOURCES: 0,2). "
-        f"If the answer is absent from context, write EXACTLY: {FREE_TEXT_FALLBACK}"
+        f"ONLY if the answer is truly absent from ALL context blocks, write EXACTLY: {FREE_TEXT_FALLBACK}"
     ),
 }
 
@@ -258,7 +258,10 @@ _BOOL_COMPARISON_INSTRUCTION = (
     "This is a comparison question. Follow these steps:\n"
     "1) Extract the relevant fact from Entity/Document 1\n"
     "2) Extract the relevant fact from Entity/Document 2\n"
-    "3) Compare them and conclude: true (same/match), false (different/no match), or null (info missing)\n\n"
+    "3) Compare them and conclude: true (same/match), false (different/no match), or null (info missing from BOTH)\n\n"
+    "IMPORTANT: If you found information about BOTH entities, you MUST answer true or false — never null.\n"
+    "Return null ONLY if one or both entities have NO information at all in the context.\n"
+    "If the entities/parties/judges are different, the answer is false.\n\n"
     "Format your response as:\n"
     "Entity 1: [fact]\n"
     "Entity 2: [fact]\n"
@@ -511,12 +514,12 @@ def answer_with_llm(
         text = page["text"].strip()
         if not text:
             continue
-        # Distill to most relevant paragraphs for extractive types
-        # Boolean and free_text need full context for reasoning
-        if answer_type not in ("bool", "boolean", "free_text"):
-            distilled = _distill_page(text, question, chars_per_page)
-        else:
+        # Distill to most relevant paragraphs for all types.
+        # For boolean comparisons: use sequential truncation to preserve context ordering.
+        if answer_type in ("bool", "boolean"):
             distilled = text[:chars_per_page]
+        else:
+            distilled = _distill_page(text, question, chars_per_page)
         context_parts.append(
             f"[BLOCK {i}: {page['doc_id']} p.{page['page_number']}]\n{distilled}"
         )
@@ -532,7 +535,7 @@ def answer_with_llm(
     # Comparison booleans get chain-of-thought prompt with higher max_tokens
     _effective_max_tokens = max_tokens
     if is_comparison and answer_type in ("bool", "boolean"):
-        _effective_max_tokens = 100  # Room for Entity1/Entity2/ANSWER/CITE
+        _effective_max_tokens = 120  # Room for Entity1/Entity2/ANSWER/CITE
     prompt = _build_prompt(question, answer_type, context, is_comparison=is_comparison)
     use_strong = False
 
@@ -572,12 +575,15 @@ def answer_with_llm(
         answer = _parse(text, answer_type)
         if answer == FREE_TEXT_FALLBACK or answer is None:
             total_ms2 = max(1, int((time.perf_counter() - _t0) * 1000))
-            return FREE_TEXT_FALLBACK if answer_type == "free_text" else None, [], ttft_ms, total_ms2, in_tok, out_tok, model
-        # Use cited pages if valid; fallback to top-2
+            return FREE_TEXT_FALLBACK, [], ttft_ms, total_ms2, in_tok, out_tok, model
+        # Use cited pages if valid; ALWAYS fallback to top-2 (never return empty)
         if ft_indices:
             used_pages = [context_pages[i] for i in ft_indices]
         else:
             used_pages = context_pages[:2]
+        # Safety: ensure non-null answer always has pages
+        if not used_pages and context_pages:
+            used_pages = context_pages[:1]
         total_ms2 = max(1, int((time.perf_counter() - _t0) * 1000))
         return answer, used_pages, ttft_ms, total_ms2, in_tok, out_tok, model
 
