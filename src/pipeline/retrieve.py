@@ -1,4 +1,5 @@
 from src.pipeline.index import tokenize
+from src.pipeline.query_expand import expand_query
 
 _STOPWORDS = frozenset(
     {
@@ -19,7 +20,7 @@ def retrieve_pages(
     top_k: int = 20,
     add_neighbors: bool = True,
 ) -> list[dict]:
-    tokens = tokenize(question)
+    tokens = expand_query(tokenize(question))
     scores = bm25.get_scores(tokens)
 
     ranked = sorted(range(len(scores)), key=lambda i: -scores[i])

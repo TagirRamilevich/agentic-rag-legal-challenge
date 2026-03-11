@@ -1,6 +1,8 @@
 import re
 from typing import Any, Optional
 
+from src.utils.number_parse import parse_number
+
 FREE_TEXT_FALLBACK = (
     "There is no information on this question in the provided documents."
 )
@@ -106,15 +108,11 @@ def extract_number(
         for sent in _sentences(page["text"]):
             score = _relevance(sent, keywords)
             if score > best_score:
-                matches = _NUMBER_RE.findall(sent)
-                if matches:
-                    try:
-                        val = float(matches[0].replace(",", ""))
-                        best_score = score
-                        best_num = int(val) if val == int(val) else val
-                        best_page = page
-                    except (ValueError, OverflowError):
-                        pass
+                val = parse_number(sent)
+                if val is not None:
+                    best_score = score
+                    best_num = val
+                    best_page = page
 
     if best_page is not None:
         return best_num, [best_page]

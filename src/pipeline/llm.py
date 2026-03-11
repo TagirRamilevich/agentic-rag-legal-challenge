@@ -3,6 +3,8 @@ import os
 import re
 from typing import Any, Optional
 
+from src.utils.number_parse import parse_number
+
 FREE_TEXT_FALLBACK = "There is no information on this question in the provided documents."
 FREE_TEXT_MAX = 280
 CONTEXT_CHARS_PER_PAGE = 2500
@@ -122,15 +124,7 @@ def _parse(raw: str, answer_type: str) -> Any:
         return None
 
     if answer_type == "number":
-        clean = re.sub(r"[$€£,\s]", "", raw)
-        m = re.search(r"-?\d+(?:\.\d+)?", clean)
-        if m:
-            try:
-                v = float(m.group())
-                return int(v) if v == int(v) else v
-            except (ValueError, OverflowError):
-                pass
-        return None
+        return parse_number(raw)
 
     if answer_type == "date":
         m = re.search(r"\d{4}-\d{2}-\d{2}", raw)

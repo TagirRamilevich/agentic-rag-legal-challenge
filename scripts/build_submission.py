@@ -14,6 +14,7 @@ import yaml
 
 from src.pipeline.ingest import ingest_corpus, get_page_counts
 from src.pipeline.index import get_or_build_index
+from src.utils.chunker import chunk_pages
 from src.pipeline.retrieve import retrieve_pages
 from src.pipeline.rerank import rerank_pages
 from src.pipeline.llm import answer_with_llm
@@ -58,8 +59,20 @@ def main(phase: str, config_path: str = "configs/rag.yaml", skip_validate: bool 
     )
     print(f"      {len(pages)} pages loaded")
 
-    print("[2/4] Building / loading BM25 index ...")
-    bm25, pages = get_or_build_index(pages, index_cache)
+    chunk_cfg = cfg.get("chunking", {})
+    if chunk_cfg.get("enabled", False):
+        print("[2/4] Chunking pages + building BM25 index ...")
+        units = chunk_pages(
+            pages,
+            chunk_tokens=chunk_cfg.get("chunk_tokens", 400),
+            overlap_tokens=chunk_cfg.get("overlap_tokens", 100),
+        )
+        print(f"      {len(units)} chunks from {len(pages)} pages")
+    else:
+        print("[2/4] Building / loading BM25 index ...")
+        units = pages
+
+    bm25, units = get_or_build_index(units, index_cache)
 
     print(f"[3/4] Loading questions from {questions_path} ...")
     with open(questions_path, encoding="utf-8") as f:
@@ -81,7 +94,7 @@ def main(phase: str, config_path: str = "configs/rag.yaml", skip_validate: bool 
     for i, q in enumerate(questions, 1):
         t0 = time.perf_counter()
 
-        retrieved = retrieve_pages(bm25, pages, q["question"], top_k=top_k_bm25, add_neighbors=add_neighbors)
+        retrieved = retrieve_pages(bm25, units, q["question"], top_k=top_k_bm25, add_neighbors=add_neighbors)
 
         if use_reranker:
             final_pages = rerank_pages(retrieved, q["question"], top_k=top_k_rerank, model_name=reranker_model)
@@ -101,7 +114,6 @@ def main(phase: str, config_path: str = "configs/rag.yaml", skip_validate: bool 
         answers.append({"question_id": q["question_id"], "answer": answer, "telemetry": telemetry})
 
         if i % 10 == 0 or i == len(questions):
-            elapsed = time.perf_counter() - t0
             print(f"      {i}/{len(questions)} done  (last ttft {telemetry['timing']['ttft_ms']}ms)")
 
     print(f"      null answers: {null_count}/{len(questions)}, llm calls: {llm_count}")

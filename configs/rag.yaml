@@ -16,6 +16,11 @@ retrieval:
 llm:
   use_llm: true
 
+chunking:
+  enabled: false          # set true to split pages into overlapping chunks
+  chunk_tokens: 400
+  overlap_tokens: 100
+
 answering:
   free_text_fallback: "There is no information on this question in the provided documents."
 
