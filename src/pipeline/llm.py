@@ -624,10 +624,18 @@ def answer_with_llm(
     if answer is None:
         return None, [], ttft_ms, total_ms_final, in_tok, out_tok, model
 
-    # Use LLM-cited pages for precise grounding; fallback to top-2
+    # Use LLM-cited pages for precise grounding; fallback to _find_source_pages
     if cited_indices:
         source_pages = [context_pages[i] for i in cited_indices]
     else:
-        # Fallback: use _find_source_pages or top-2
         source_pages = _find_source_pages(answer, context_pages, answer_type)
+    # Grounding recall boost: if only 1 source page, add the adjacent page
+    # from the same doc (answers often span page boundaries; β=2.5 rewards recall)
+    if len(source_pages) == 1 and len(context_pages) > 1:
+        src = source_pages[0]
+        # Look for adjacent page in context_pages
+        for cp in context_pages:
+            if cp["doc_id"] == src["doc_id"] and cp["page_number"] in (src["page_number"] - 1, src["page_number"] + 1):
+                source_pages.append(cp)
+                break
     return answer, source_pages, ttft_ms, total_ms_final, in_tok, out_tok, model
