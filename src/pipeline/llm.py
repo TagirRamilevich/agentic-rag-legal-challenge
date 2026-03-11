@@ -285,7 +285,8 @@ def answer_with_llm(
 
     context = "\n\n---\n\n".join(context_parts)
     prompt = _build_prompt(question, answer_type, context)
-    raw = _call(prompt, max_tokens=max_tokens)
+    use_strong = answer_type == "free_text"
+    raw = _call(prompt, max_tokens=max_tokens, use_strong_model=use_strong)
 
     if raw is None:
         from src.pipeline.answer import answer_question
