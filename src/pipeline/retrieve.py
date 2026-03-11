@@ -185,14 +185,14 @@ def retrieve_pages(
             early: list[int] = []
             if idxs:
                 top_doc_id = pages[idxs[0]]["doc_id"]
-                # For "Law No. X of YYYY" date/commencement questions, prefer the
-                # enactment notice (1-page doc) over larger docs that merely reference it.
-                # Only do this for date-type questions; for admin questions we need main law pages.
+                # For date/commencement comparison questions, prefer enactment notice
+                # (1-page doc) over larger amended-law docs that merely reference it.
+                # Only for date questions; admin/other questions need main law pages.
                 _date_q = re.search(
                     r"\b(come into force|commencement|enacted|same date|same year|enact)\b",
                     question, re.IGNORECASE,
                 )
-                if _LAW_NO_EXACT_RE.search(sq) and _date_q:
+                if _date_q:
                     notice_doc = _find_enactment_notice_doc(
                         sq, pages, _doc_page_counts, doc_page_index
                     )
