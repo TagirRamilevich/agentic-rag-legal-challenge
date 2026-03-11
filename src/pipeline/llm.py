@@ -12,14 +12,15 @@ FREE_TEXT_MAX = 280
 
 # Context size per answer type
 # max_tokens includes room for CITE: suffix (~10 tokens)
-# Boolean needs more context for comparison reasoning across 2 docs
+# With context distillation, chars_per_page is the distilled paragraph budget
+# Boolean: needs more pages for comparison across 2 docs
 _TYPE_CONFIG = {
     "bool":     {"max_pages": 5, "chars": 2500, "max_tokens": 30},
     "boolean":  {"max_pages": 5, "chars": 2500, "max_tokens": 30},
-    "number":   {"max_pages": 3, "chars": 2500, "max_tokens": 30},
-    "date":     {"max_pages": 3, "chars": 2000, "max_tokens": 30},
-    "name":     {"max_pages": 4, "chars": 2000, "max_tokens": 60},
-    "names":    {"max_pages": 4, "chars": 2000, "max_tokens": 160},
+    "number":   {"max_pages": 3, "chars": 1200, "max_tokens": 30},
+    "date":     {"max_pages": 3, "chars": 1200, "max_tokens": 30},
+    "name":     {"max_pages": 4, "chars": 1200, "max_tokens": 60},
+    "names":    {"max_pages": 4, "chars": 1500, "max_tokens": 160},
     "free_text":{"max_pages": 3, "chars": 2000, "max_tokens": 350},
 }
 _DEFAULT_CONFIG = {"max_pages": 3, "chars": 1200, "max_tokens": 256}
@@ -81,6 +82,7 @@ def _call(
             with client.messages.stream(
                 model=model,
                 max_tokens=max_tokens,
+                temperature=0,
                 messages=[{"role": "user", "content": prompt}],
             ) as stream:
                 for chunk in stream.text_stream:
@@ -157,7 +159,7 @@ _TYPE_INSTRUCTIONS = {
         "compare the specific facts from each document block carefully. "
         "If the two values clearly differ, return false. "
         "If they clearly match, return true. "
-        "Only return null if the context truly lacks information to answer." + _CITE_SUFFIX
+        "Only return null if the context truly lacks the specific information needed." + _CITE_SUFFIX
     ),
     "boolean": (
         "Return ONLY the word true, false, or null (lowercase, nothing else). "
@@ -167,7 +169,7 @@ _TYPE_INSTRUCTIONS = {
         "compare the specific facts from each document block carefully. "
         "If the two values clearly differ, return false. "
         "If they clearly match, return true. "
-        "Only return null if the context truly lacks information to answer." + _CITE_SUFFIX
+        "Only return null if the context truly lacks the specific information needed." + _CITE_SUFFIX
     ),
     "date": (
         "Return ONLY a date in YYYY-MM-DD format. "
@@ -177,6 +179,8 @@ _TYPE_INSTRUCTIONS = {
     "name": (
         "Return ONLY the name or entity as a short phrase. "
         "Include the full legal name if available. "
+        "For 'which case' questions: return the case number (e.g. 'CFI 010/2024'). "
+        "For 'which party had higher/lower' questions: compare the values and return the correct one. "
         "No explanation, no extra text. "
         "If not found in context: null" + _CITE_SUFFIX
     ),
@@ -184,7 +188,8 @@ _TYPE_INSTRUCTIONS = {
         "Return ONLY a JSON array of strings. "
         'Example: ["John Smith", "Acme Corp Ltd"]. '
         "No markdown code blocks. No explanations. "
-        "Include every person, company or entity that answers the question. "
+        "Include every relevant person, company, or entity that answers the question. "
+        "Use the EXACT names as they appear in the documents. "
         "If genuinely not found: null" + _CITE_SUFFIX
     ),
     "free_text": (
@@ -196,6 +201,43 @@ _TYPE_INSTRUCTIONS = {
         f"If the answer is absent from context, write only: {FREE_TEXT_FALLBACK}"
     ),
 }
+
+
+def _distill_page(text: str, question: str, max_chars: int) -> str:
+    """Extract the most relevant paragraphs from a page for the given question.
+    Returns distilled text up to max_chars."""
+    if len(text) <= max_chars:
+        return text
+
+    # Split into paragraphs (by double newline or single newline for short blocks)
+    paragraphs = re.split(r"\n\s*\n|\n(?=[A-Z0-9\(\[])", text)
+    if len(paragraphs) <= 1:
+        return text[:max_chars]
+
+    # Score paragraphs by keyword overlap with question
+    q_words = set(w.lower() for w in re.sub(r"[^\w\s]", " ", question).split() if len(w) > 2)
+    scored = []
+    for para in paragraphs:
+        para = para.strip()
+        if not para:
+            continue
+        p_lower = para.lower()
+        score = sum(1 for w in q_words if w in p_lower)
+        scored.append((score, para))
+
+    # Sort by relevance, take top paragraphs fitting max_chars
+    scored.sort(key=lambda x: -x[0])
+    result_parts = []
+    total = 0
+    for score, para in scored:
+        if total + len(para) > max_chars:
+            if not result_parts:
+                result_parts.append(para[:max_chars])
+            break
+        result_parts.append(para)
+        total += len(para) + 2  # +2 for newline separator
+
+    return "\n\n".join(result_parts) if result_parts else text[:max_chars]
 
 
 def _build_prompt(question: str, answer_type: str, context: str) -> str:
@@ -410,6 +452,7 @@ def answer_with_llm(
     question_data: dict,
     pages: list[dict],
     t0: Optional[float] = None,
+    is_comparison: bool = False,
 ) -> tuple[Any, list[dict], int, int, int, int, str]:
     """
     Returns: (answer, used_pages, ttft_ms, total_ms, input_tokens, output_tokens, model_name)
@@ -431,14 +474,22 @@ def answer_with_llm(
     chars_per_page = cfg["chars"]
     max_tokens = cfg["max_tokens"]
 
+    # Keep is_comparison for potential future use
+
     context_parts: list[str] = []
     context_pages: list[dict] = []
     for i, page in enumerate(pages[:max_pages]):
         text = page["text"].strip()
         if not text:
             continue
+        # Distill to most relevant paragraphs for extractive types
+        # Boolean and free_text need full context for reasoning
+        if answer_type not in ("bool", "boolean", "free_text"):
+            distilled = _distill_page(text, question, chars_per_page)
+        else:
+            distilled = text[:chars_per_page]
         context_parts.append(
-            f"[BLOCK {i}: {page['doc_id']} p.{page['page_number']}]\n{text[:chars_per_page]}"
+            f"[BLOCK {i}: {page['doc_id']} p.{page['page_number']}]\n{distilled}"
         )
         context_pages.append(page)
 

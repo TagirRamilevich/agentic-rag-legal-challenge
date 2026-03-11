@@ -89,17 +89,17 @@ def main(use_llm: bool = True, use_rerank: bool = True, limit: int = 0, verbose:
         retrieved = retrieve_pages(bm25, pages, q["question"], top_k=15, add_neighbors=True, answer_type=answer_type, embeddings=embeddings)
 
         is_cmp = is_comparison_question(q["question"])
-        # Skip cross-encoder only for number/date: BM25+anchor already targets right page
-        # Keep reranker for bool/name/names/free_text where ranking quality matters
-        _SKIP_RERANK = {"number", "date"}
-        need_rerank = use_rerank and (answer_type not in _SKIP_RERANK or is_cmp)
+        # Only rerank comparison questions: they need cross-encoder to
+        # properly rank pages from different docs with max_per_doc diversity.
+        # Non-comparison: BM25+embedding hybrid + priority pages is sufficient.
+        need_rerank = use_rerank and is_cmp
         if need_rerank:
             final = rerank_pages(retrieved, q["question"], top_k=5, max_per_doc=2 if is_cmp else 0)
         else:
             final = retrieved[:5]
 
         if use_llm:
-            answer, used_pages, ttft_ms, total_ms_q, *_ = answer_with_llm(q, final, t0=t0)
+            answer, used_pages, ttft_ms, total_ms_q, *_ = answer_with_llm(q, final, t0=t0, is_comparison=is_cmp)
         else:
             answer, used_pages = answer_question(q, final)
             ttft_ms = int((time.perf_counter() - t0) * 1000)

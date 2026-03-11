@@ -116,15 +116,15 @@ def main(phase: str, config_path: str = "configs/rag.yaml", skip_validate: bool 
         retrieved = retrieve_pages(bm25, units, q["question"], top_k=top_k_bm25, add_neighbors=add_neighbors, answer_type=q.get("answer_type", ""), embeddings=embeddings)
 
         is_cmp = is_comparison_question(q["question"])
-        _SKIP_RERANK = {"number", "date"}
-        need_rerank = use_reranker and (q.get("answer_type") not in _SKIP_RERANK or is_cmp)
+        # Only rerank comparison questions (need cross-encoder for multi-doc diversity)
+        need_rerank = use_reranker and is_cmp
         if need_rerank:
             final_pages = rerank_pages(retrieved, q["question"], top_k=top_k_rerank, model_name=reranker_model, max_per_doc=2 if is_cmp else 0)
         else:
             final_pages = retrieved[:top_k_rerank]
 
         if use_llm:
-            answer, used_pages, ttft_ms, total_ms, in_tok, out_tok, model = answer_with_llm(q, final_pages, t0=t0)
+            answer, used_pages, ttft_ms, total_ms, in_tok, out_tok, model = answer_with_llm(q, final_pages, t0=t0, is_comparison=is_cmp)
             llm_count += 1
         else:
             answer, used_pages = answer_question(q, final_pages)
