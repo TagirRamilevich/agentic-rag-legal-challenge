@@ -157,6 +157,9 @@ _TYPE_INSTRUCTIONS = {
     "number": (
         "Return ONLY a single numeric value (integer or decimal). "
         "No units, no currency symbols, no extra text. "
+        "IMPORTANT: The answer is the VALUE stated in the article text, NOT the article number itself. "
+        "For example, if Article 19(4) says 'within six (6) months', the answer is 6, NOT 19. "
+        "Look for the specific quantity, duration, amount, or count mentioned in the text. "
         "Numbers in parentheses like (5,000) mean negative: -5000. "
         "Convert thousands/millions: '1.5 million' → 1500000. "
         "If multiple numbers appear, choose the one that directly answers the question. "

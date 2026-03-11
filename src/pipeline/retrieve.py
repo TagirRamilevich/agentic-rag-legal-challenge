@@ -462,6 +462,10 @@ def retrieve_pages(
         article_priority_pages: list[int] = []
         for idx, p in enumerate(pages):
             if p["doc_id"] == top_doc_id and article_pat.search(p["text"]):
+                # Skip TOC/contents pages — they mention article numbers but don't contain the text
+                _is_toc = "CONTENTS" in p["text"][:300] or "TABLE OF CONTENTS" in p["text"][:300]
+                if _is_toc:
+                    continue
                 tagged = dict(p)
                 tagged["_priority"] = True
                 article_priority_pages.append(idx)
