@@ -7,12 +7,37 @@ from src.utils.number_parse import parse_number
 
 FREE_TEXT_FALLBACK = "There is no information on this question in the provided documents."
 FREE_TEXT_MAX = 280
-CONTEXT_CHARS_PER_PAGE = 1200
-MAX_CONTEXT_PAGES = 3
-# Extractive types use less context for faster TTFT
-_EXTRACTIVE_TYPES = {"number", "bool", "boolean", "date", "name", "names"}
-CONTEXT_CHARS_EXTRACTIVE = 800
-MAX_CONTEXT_PAGES_EXTRACTIVE = 2
+
+# Context size per answer type
+_TYPE_CONFIG = {
+    "bool":     {"max_pages": 3, "chars": 1000, "max_tokens": 20},
+    "boolean":  {"max_pages": 3, "chars": 1000, "max_tokens": 20},
+    "number":   {"max_pages": 2, "chars": 800,  "max_tokens": 20},
+    "date":     {"max_pages": 2, "chars": 800,  "max_tokens": 20},
+    "name":     {"max_pages": 2, "chars": 900,  "max_tokens": 50},
+    "names":    {"max_pages": 3, "chars": 900,  "max_tokens": 150},
+    "free_text":{"max_pages": 3, "chars": 1500, "max_tokens": 280},
+}
+_DEFAULT_CONFIG = {"max_pages": 3, "chars": 1200, "max_tokens": 256}
+
+_NOT_FOUND_RE = re.compile(
+    r"(does not (identify|contain|mention|provide|include|specify)|"
+    r"no (information|mention|reference|record)|"
+    r"cannot (be|find|determine)|"
+    r"not (found|available|present|identified|mentioned|specified|stated))",
+    re.IGNORECASE,
+)
+
+_TRUE_RE = re.compile(
+    r"\b(granted|approved|allowed|upheld|confirmed|correct|permitted|"
+    r"succeeded|successful|enacted|yes|true)\b",
+    re.IGNORECASE,
+)
+_FALSE_RE = re.compile(
+    r"\b(dismissed|denied|rejected|refused|prohibited|incorrect|"
+    r"not granted|not approved|failed|unsuccessful|false|no\b)\b",
+    re.IGNORECASE,
+)
 
 
 def _provider() -> Optional[str]:
@@ -76,18 +101,20 @@ _TYPE_INSTRUCTIONS = {
         "If not found in context: null"
     ),
     "bool": (
-        "Return ONLY true or false (lowercase). "
-        "true = yes, granted, approved, allowed, upheld, confirmed, correct, permitted. "
-        "false = no, dismissed, denied, rejected, refused, prohibited, incorrect. "
-        "Read the context carefully for the court ruling or factual statement. "
-        "If genuinely absent from context: null"
+        "Return ONLY the word true or the word false (lowercase, nothing else). "
+        "true = yes / granted / approved / allowed / upheld / correct / same. "
+        "false = no / dismissed / denied / rejected / refused / different / earlier / later. "
+        "Look for court rulings, comparisons, or factual statements. "
+        "Make your best determination from the available context. "
+        "Only return null if the topic is completely absent from the context."
     ),
     "boolean": (
-        "Return ONLY true or false (lowercase). "
-        "true = yes, granted, approved, allowed, upheld, confirmed, correct, permitted. "
-        "false = no, dismissed, denied, rejected, refused, prohibited, incorrect. "
-        "Read the context carefully for the court ruling or factual statement. "
-        "If genuinely absent from context: null"
+        "Return ONLY the word true or the word false (lowercase, nothing else). "
+        "true = yes / granted / approved / allowed / upheld / correct / same. "
+        "false = no / dismissed / denied / rejected / refused / different / earlier / later. "
+        "Look for court rulings, comparisons, or factual statements. "
+        "Make your best determination from the available context. "
+        "Only return null if the topic is completely absent from the context."
     ),
     "date": (
         "Return ONLY a date in YYYY-MM-DD format. "
@@ -96,23 +123,21 @@ _TYPE_INSTRUCTIONS = {
     ),
     "name": (
         "Return ONLY the name or entity as a short phrase. "
-        "Include the full legal name if available (e.g. 'Acme Corp Ltd'). "
+        "Include the full legal name if available. "
         "No explanation, no extra text. "
         "If not found in context: null"
     ),
     "names": (
-        "Return ONLY a JSON array of strings with ALL matching names/entities. "
-        'Example: ["John Smith", "Acme Corp Ltd", "Beta LLC"]. '
-        "Do NOT wrap in markdown code blocks. "
-        "Include all parties, people or entities that answer the question. "
-        "Be inclusive — if someone is mentioned in the relevant role, include them. "
-        "If not found in context: null"
+        "Return ONLY a JSON array of strings. "
+        'Example: ["John Smith", "Acme Corp Ltd"]. '
+        "No markdown code blocks. No explanations. "
+        "Include every person, company or entity that answers the question. "
+        "If genuinely not found: null"
     ),
     "free_text": (
         f"Answer in 1–3 sentences, maximum {FREE_TEXT_MAX} characters total. "
-        "Base your answer ONLY on information in the provided context. "
-        "Be specific and cite relevant details. Do not hallucinate. "
-        f"If the answer is not in the context: {FREE_TEXT_FALLBACK}"
+        "Use ONLY information from the provided context. Do not hallucinate. "
+        f"If the answer is absent: {FREE_TEXT_FALLBACK}"
     ),
 }
 
@@ -123,7 +148,6 @@ def _build_prompt(question: str, answer_type: str, context: str) -> str:
         "Extract the answer from the following legal document context.\n\n"
         f"Context:\n{context}\n\n"
         f"Question: {question}\n"
-        f"Answer type: {answer_type}\n"
         f"Instruction: {instruction}\n\n"
         "Answer:"
     )
@@ -131,26 +155,17 @@ def _build_prompt(question: str, answer_type: str, context: str) -> str:
 
 def _parse(raw: str, answer_type: str) -> Any:
     raw = raw.strip()
-    if raw.lower() in ("null", "none", "n/a", ""):
+    if not raw or raw.lower() in ("null", "none", "n/a"):
         return None
 
     if answer_type in ("bool", "boolean"):
         low = raw.lower()
-        if low in ("true", "yes", "1"):
+        if low in ("true", "yes"):
             return True
-        if low in ("false", "no", "0"):
+        if low in ("false", "no"):
             return False
-        # LLM sometimes returns a sentence instead of bare true/false
-        _TRUE_SIGNALS = re.compile(
-            r"\b(granted|approved|allowed|upheld|confirmed|correct|yes|true|permitted|succeeded|successful)\b",
-            re.IGNORECASE,
-        )
-        _FALSE_SIGNALS = re.compile(
-            r"\b(dismissed|denied|rejected|refused|prohibited|incorrect|false|no\b|not granted|not approved|failed|unsuccessful)\b",
-            re.IGNORECASE,
-        )
-        t = len(_TRUE_SIGNALS.findall(raw))
-        f = len(_FALSE_SIGNALS.findall(raw))
+        t = len(_TRUE_RE.findall(raw))
+        f = len(_FALSE_RE.findall(raw))
         if t > f:
             return True
         if f > t:
@@ -169,22 +184,39 @@ def _parse(raw: str, answer_type: str) -> Any:
         return None
 
     if answer_type == "names":
+        # Detect "cannot find" responses before trying to parse
+        if _NOT_FOUND_RE.search(raw) and not raw.strip().startswith("["):
+            return None
         clean = re.sub(r"```(?:json)?\s*|\s*```", "", raw).strip()
         try:
             parsed = json.loads(clean)
             if isinstance(parsed, list):
-                return [str(x).strip() for x in parsed if x] or None
+                items = [str(x).strip() for x in parsed if x and str(x).strip()]
+                return items or None
         except json.JSONDecodeError:
             pass
-        items = [x.strip().strip("\"'[]") for x in re.split(r"[,\n;]", clean) if x.strip().strip("\"'[]")]
-        return items or None
+        # Split only if it looks like a list (contains quotes or short items)
+        if '"' in clean or clean.startswith("["):
+            items = [x.strip().strip("\"'[] ") for x in re.split(r'[,\n]', clean)]
+            items = [x for x in items if x and len(x) < 150 and not _NOT_FOUND_RE.search(x)]
+            return items or None
+        # Single value — treat as a one-item list
+        if len(clean) < 150 and not _NOT_FOUND_RE.search(clean):
+            return [clean.strip("\"' ")]
+        return None
 
     if answer_type == "name":
+        if _NOT_FOUND_RE.search(raw):
+            return None
         result = raw.strip("\"' ").strip()[:200]
         return result or None
 
     if answer_type == "free_text":
-        return raw[:FREE_TEXT_MAX]
+        text = raw[:FREE_TEXT_MAX]
+        # If LLM starts with fallback then keeps writing, truncate at fallback
+        if text.startswith(FREE_TEXT_FALLBACK[:30]):
+            return FREE_TEXT_FALLBACK
+        return text
 
     return raw or None
 
@@ -219,9 +251,10 @@ def answer_with_llm(
         from src.pipeline.answer import answer_question
         return answer_question(question_data, pages)
 
-    is_extractive = answer_type in _EXTRACTIVE_TYPES
-    max_pages = MAX_CONTEXT_PAGES_EXTRACTIVE if is_extractive else MAX_CONTEXT_PAGES
-    chars_per_page = CONTEXT_CHARS_EXTRACTIVE if is_extractive else CONTEXT_CHARS_PER_PAGE
+    cfg = _TYPE_CONFIG.get(answer_type, _DEFAULT_CONFIG)
+    max_pages = cfg["max_pages"]
+    chars_per_page = cfg["chars"]
+    max_tokens = cfg["max_tokens"]
 
     context_parts: list[str] = []
     context_pages: list[dict] = []
@@ -239,7 +272,7 @@ def answer_with_llm(
 
     context = "\n\n---\n\n".join(context_parts)
     prompt = _build_prompt(question, answer_type, context)
-    raw = _call(prompt)
+    raw = _call(prompt, max_tokens=max_tokens)
 
     if raw is None:
         from src.pipeline.answer import answer_question
