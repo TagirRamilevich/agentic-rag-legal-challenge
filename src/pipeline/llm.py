@@ -225,33 +225,16 @@ def _parse(raw: str, answer_type: str) -> Any:
 
 
 def _find_source_pages(answer: Any, pages: list[dict], answer_type: str = "") -> list[dict]:
-    """Return only the 1–2 pages most likely to contain the answer.
-    Grounding is F-beta(β=2.5): recall-weighted but precision still penalised.
-    Returning fewer pages keeps precision high while recall stays 1 when we pick right.
+    """Return all context pages as sources.
+
+    With grounding F-beta β=2.5, recall is heavily weighted over precision.
+    Returning all context pages maximises recall (gold page is almost always
+    in the context we sent to the LLM) at a modest precision cost.
+    Narrowing to 1-2 pages risks picking the wrong page → recall=0 → G≈0.
     """
     if answer is None or not pages:
         return []
-    answer_str = str(answer).lower() if not isinstance(answer, list) else " ".join(answer).lower()
-    words = [w for w in answer_str.split() if len(w) > 4][:12]
-
-    # Webinar: if answer spans multiple pages, include all.
-    # β=2.5 means recall >> precision → returning 2 pages is safe.
-    # free_text/names can span docs; others usually 1 page but allow 2 for border cases.
-    max_src = 2
-
-    if not words:
-        return pages[:max_src]
-
-    scored = []
-    for page in pages:
-        page_lower = page["text"].lower()
-        hits = sum(1 for w in words if w in page_lower)
-        if hits > 0:
-            scored.append((hits, page))
-    if scored:
-        scored.sort(key=lambda x: -x[0])
-        return [p for _, p in scored[:max_src]]
-    return pages[:max_src]
+    return pages
 
 
 def answer_with_llm(
