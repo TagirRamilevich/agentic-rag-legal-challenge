@@ -475,9 +475,11 @@ def retrieve_pages(
                     # Score: length of matching prefix in title line
                     if law_name in text_lower:
                         cnt = _doc_page_counts[p["doc_id"]]
-                        # Prefer exact match in title (first 100 chars) over body mentions
+                        # Prefer exact match in title (first 100 chars); penalize amendment diffs
                         in_title = law_name in text_lower[:100]
-                        score = (int(in_title) * 1000) + cnt
+                        is_consolidated = "consolidated" in text_lower[:300]
+                        is_amendment_diff = "underlining indicates new text" in text_lower[:300]
+                        score = (int(in_title) * 1000) + (int(is_consolidated) * 500) - (int(is_amendment_diff) * 500) + cnt
                         if score > best_match_len:
                             best_match_len = score
                             best_doc = p["doc_id"]
@@ -593,6 +595,12 @@ def retrieve_pages(
             r"\b(?:Law No\.\s*\d+\s+of\s+\d{4}|(?:[A-Z][a-z]+\s+){1,4}(?:Law|Regulations?))\b"
         )
         law_phrases_q = [m.group(0).lower() for m in _mp_law_re2.finditer(question)]
+        # Also extract quoted law names like 'Law on the Application...'
+        _quoted_law_re = re.compile(r"['\"]([^'\"]{10,80})['\"]|(?:the\s+)((?:[A-Z][\w]+\s+){1,8}(?:Law|Regulations?))", re.IGNORECASE)
+        for qm in _quoted_law_re.finditer(question):
+            phrase = (qm.group(1) or qm.group(2) or "").strip().lower()
+            if phrase and len(phrase) > 10:
+                law_phrases_q.append(phrase)
         if law_phrases_q:
             # Use the longest law phrase (most specific)
             best_law_q = max(law_phrases_q, key=len)
@@ -600,15 +608,18 @@ def retrieve_pages(
             best_score2: int = 0
             for p in pages:
                 if p["page_number"] == 1:
-                    text_lower = p["text"].lower()
+                    # Normalize whitespace for matching (PDFs have newlines in titles)
+                    text_lower = " ".join(p["text"].lower().split())
                     if best_law_q in text_lower:
                         # "in_title": law appears before any "as amended by" / "consolidated" section
-                        # This distinguishes the law itself from docs that merely list it as an amendment
                         cutoff = min(text_lower.find("as amended"), text_lower.find("consolidated"))
                         cutoff = max(cutoff, 0) if cutoff >= 0 else 300
                         in_title = best_law_q in text_lower[:cutoff] if cutoff > 10 else best_law_q in text_lower[:100]
                         cnt = _doc_page_counts[p["doc_id"]]
-                        score = (int(in_title) * 10000) + cnt
+                        # Prefer consolidated versions; penalize amendment-diff docs
+                        is_consolidated = "consolidated" in text_lower[:300]
+                        is_amendment_diff = "underlining indicates new text" in text_lower[:300]
+                        score = (int(in_title) * 10000) + (int(is_consolidated) * 5000) - (int(is_amendment_diff) * 5000) + cnt
                         if score > best_score2:
                             best_score2 = score
                             best_doc2 = p["doc_id"]
