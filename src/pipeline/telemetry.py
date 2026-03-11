@@ -8,7 +8,11 @@ def build_telemetry(start_time: float, used_pages: list[dict]) -> dict:
 
     by_doc: dict[str, set] = {}
     for page in used_pages:
-        by_doc.setdefault(page["doc_id"], set()).add(page["page_number"])
+        # Platform expects doc_id without file extension (e.g. "abc123", not "abc123.pdf")
+        doc_id = page["doc_id"]
+        if doc_id.endswith(".pdf"):
+            doc_id = doc_id[:-4]
+        by_doc.setdefault(doc_id, set()).add(page["page_number"])
 
     retrieved_chunk_pages = [
         {"doc_id": doc_id, "page_numbers": sorted(pns)}

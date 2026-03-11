@@ -59,11 +59,13 @@ def validate_submission(
                         errors.append(f"{p}: retrieval ref missing doc_id")
                     if not isinstance(page_numbers, list):
                         errors.append(f"{p}: page_numbers must be a list")
+                    # doc_id in submission has no .pdf extension; add it back for local file check
+                    doc_id_file = doc_id if doc_id.endswith(".pdf") else doc_id + ".pdf"
                     if docs_dir and doc_id:
-                        if not os.path.exists(os.path.join(docs_dir, doc_id)):
+                        if not os.path.exists(os.path.join(docs_dir, doc_id_file)):
                             errors.append(f"{p}: doc_id '{doc_id}' not found in {docs_dir}")
                     if page_counts and doc_id and isinstance(page_numbers, list):
-                        max_p = page_counts.get(doc_id, 0)
+                        max_p = page_counts.get(doc_id_file, page_counts.get(doc_id, 0))
                         for pn in page_numbers:
                             if not isinstance(pn, int) or pn < 1 or pn > max_p:
                                 errors.append(
