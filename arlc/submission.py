@@ -7,12 +7,12 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, List, Optional, Union
 
 from arlc.telemetry import Telemetry
 
 
-AnswerValue = str | int | float | bool | list[str] | None
+AnswerValue = Optional[Union[str, int, float, bool, List[str]]]
 
 
 @dataclass(frozen=True)
