@@ -56,10 +56,26 @@ def _extract_multi_entity_queries(question: str):
     if len(cases) >= 2:
         return list(dict.fromkeys(cases))  # deduplicated, order-preserved
 
-    # Strategy 2: two law references → one query per law
-    laws = _LAW_REF_RE.findall(question)
-    if len(laws) >= 2:
-        return list(dict.fromkeys(laws))
+    # Strategy 2: two law references → one query per law.
+    # First check for specific "Law No. X of Y" patterns (most discriminative).
+    _law_no_re = re.compile(r"\bLaw No\.\s*\d+\s+of\s+\d{4}\b", re.IGNORECASE)
+    law_nos = list(dict.fromkeys(_law_no_re.findall(question)))
+    if len(law_nos) >= 2:
+        return law_nos[:2]
+    # Then try multi-word law phrase extractor for named laws
+    # (e.g. "Leasing Law", "Real Property Law Amendment Law")
+    _mp_law_re = re.compile(
+        r"\b(?:[A-Z][a-z]+\s+){1,4}(?:Law|Regulations?)\b"
+    )
+    law_phrases = [m.group(0) for m in _mp_law_re.finditer(question)]
+    # Remove any phrase that is a suffix of a longer phrase already in the list
+    unique_laws: list[str] = []
+    for ph in law_phrases:
+        dominated = any(ph != other and ph in other for other in law_phrases)
+        if not dominated and ph not in unique_laws:
+            unique_laws.append(ph)
+    if len(unique_laws) >= 2:
+        return unique_laws[:2]
 
     # Strategy 3: split around comparison connectives
     for splitter in [
@@ -282,7 +298,36 @@ def retrieve_pages(
     # (title pages always have the law number and enactment date)
     # Tag with _priority to prevent cross-encoder from pushing them out.
     if _LAW_IDENTITY_RE.search(question) and main_indices and not article_m:
+        # Find the best-matching doc: prefer docs whose p.1 title closely matches the law name
+        # from the question (avoids picking the wrong law when many laws match BM25).
         top_doc_id = pages[main_indices[0]]["doc_id"]
+        _mp_law_re2 = re.compile(
+            r"\b(?:Law No\.\s*\d+\s+of\s+\d{4}|(?:[A-Z][a-z]+\s+){1,4}(?:Law|Regulations?))\b"
+        )
+        law_phrases_q = [m.group(0).lower() for m in _mp_law_re2.finditer(question)]
+        if law_phrases_q:
+            # Use the longest law phrase (most specific)
+            best_law_q = max(law_phrases_q, key=len)
+            from collections import Counter as _Counter2
+            doc_page_counts2 = _Counter2(p["doc_id"] for p in pages)
+            best_doc2: str = ""
+            best_score2: int = 0
+            for p in pages:
+                if p["page_number"] == 1:
+                    text_lower = p["text"].lower()
+                    if best_law_q in text_lower:
+                        # "in_title": law appears before any "as amended by" / "consolidated" section
+                        # This distinguishes the law itself from docs that merely list it as an amendment
+                        cutoff = min(text_lower.find("as amended"), text_lower.find("consolidated"))
+                        cutoff = max(cutoff, 0) if cutoff >= 0 else 300
+                        in_title = best_law_q in text_lower[:cutoff] if cutoff > 10 else best_law_q in text_lower[:100]
+                        cnt = doc_page_counts2[p["doc_id"]]
+                        score = (int(in_title) * 10000) + cnt
+                        if score > best_score2:
+                            best_score2 = score
+                            best_doc2 = p["doc_id"]
+            if best_doc2:
+                top_doc_id = best_doc2
         for pg in (1, 2, 3):
             j = doc_page_index.get((top_doc_id, pg))
             if j is not None:
