@@ -242,8 +242,25 @@ def _distill_page(text: str, question: str, max_chars: int) -> str:
     return "\n\n".join(result_parts) if result_parts else text[:max_chars]
 
 
-def _build_prompt(question: str, answer_type: str, context: str) -> str:
-    instruction = _TYPE_INSTRUCTIONS.get(answer_type, _TYPE_INSTRUCTIONS["free_text"])
+_BOOL_COMPARISON_INSTRUCTION = (
+    "This is a comparison question. Follow these steps:\n"
+    "1) Extract the relevant fact from Entity/Document 1\n"
+    "2) Extract the relevant fact from Entity/Document 2\n"
+    "3) Compare them and conclude: true (same/match), false (different/no match), or null (info missing)\n\n"
+    "Format your response as:\n"
+    "Entity 1: [fact]\n"
+    "Entity 2: [fact]\n"
+    "ANSWER: true/false/null\n"
+    "CITE: [block numbers]"
+)
+
+
+def _build_prompt(question: str, answer_type: str, context: str,
+                  is_comparison: bool = False) -> str:
+    if is_comparison and answer_type in ("bool", "boolean"):
+        instruction = _BOOL_COMPARISON_INSTRUCTION
+    else:
+        instruction = _TYPE_INSTRUCTIONS.get(answer_type, _TYPE_INSTRUCTIONS["free_text"])
     return (
         "Extract the answer from the following legal document context.\n\n"
         f"Context:\n{context}\n\n"
@@ -500,13 +517,15 @@ def answer_with_llm(
         return None, [], elapsed, elapsed, 0, 0, "none"
 
     context = "\n\n---\n\n".join(context_parts)
-    prompt = _build_prompt(question, answer_type, context)
-    # Use Haiku for all types (fast TTFT → F=1.05 bonus)
-    # Sonnet is ~3× slower to first token; Haiku is sufficient for structured extraction
+    # Comparison booleans get chain-of-thought prompt with higher max_tokens
+    _effective_max_tokens = max_tokens
+    if is_comparison and answer_type in ("bool", "boolean"):
+        _effective_max_tokens = 120  # Room for Entity1/Entity2/ANSWER/CITE
+    prompt = _build_prompt(question, answer_type, context, is_comparison=is_comparison)
     use_strong = False
 
     raw, ttft_ms, total_ms, in_tok, out_tok, model = _call(
-        prompt, max_tokens=max_tokens, use_strong_model=use_strong, t0=_t0
+        prompt, max_tokens=_effective_max_tokens, use_strong_model=use_strong, t0=_t0
     )
 
     if raw is None:
@@ -515,8 +534,25 @@ def answer_with_llm(
         elapsed = max(1, int((time.perf_counter() - _t0) * 1000))
         return ans, used, elapsed, elapsed, 0, 0, "deterministic-fallback"
 
-    # Parse citation from LLM response (works for all types)
-    clean_raw, cited_indices = _parse_citation(raw, len(context_pages))
+    # For comparison booleans: extract ANSWER: line from structured CoT response
+    if is_comparison and answer_type in ("bool", "boolean") and raw:
+        answer_m = re.search(r"\bANSWER:\s*(true|false|null)\b", raw, re.IGNORECASE)
+        if answer_m:
+            # Extract citation from the full response before overwriting
+            _, cited_indices_cot = _parse_citation(raw, len(context_pages))
+            raw = answer_m.group(1).lower()
+            if cited_indices_cot:
+                # Pre-set citation from CoT response
+                clean_raw = raw
+                cited_indices = cited_indices_cot
+            else:
+                clean_raw, cited_indices = raw, []
+        else:
+            # No structured ANSWER: found — fall through to normal parsing
+            clean_raw, cited_indices = _parse_citation(raw, len(context_pages))
+    else:
+        # Parse citation from LLM response (works for all types)
+        clean_raw, cited_indices = _parse_citation(raw, len(context_pages))
 
     # For free_text: use SOURCES-based citation
     if answer_type == "free_text":
