@@ -532,7 +532,7 @@ def answer_with_llm(
     # Comparison booleans get chain-of-thought prompt with higher max_tokens
     _effective_max_tokens = max_tokens
     if is_comparison and answer_type in ("bool", "boolean"):
-        _effective_max_tokens = 120  # Room for Entity1/Entity2/ANSWER/CITE
+        _effective_max_tokens = 100  # Room for Entity1/Entity2/ANSWER/CITE
     prompt = _build_prompt(question, answer_type, context, is_comparison=is_comparison)
     use_strong = False
 
@@ -583,35 +583,6 @@ def answer_with_llm(
 
     # For non-free_text: parse answer from cleaned text (CITE suffix removed)
     answer = _parse(clean_raw, answer_type)
-
-    # Retry with more pages if first attempt returns null
-    if answer is None and answer_type in ("number", "date", "names") and len(pages) > max_pages:
-        retry_pages = min(max_pages + 3, len(pages))
-        retry_parts: list[str] = []
-        retry_context_pages: list[dict] = []
-        for i, page in enumerate(pages[:retry_pages]):
-            text = page["text"].strip()
-            if not text:
-                continue
-            retry_parts.append(
-                f"[BLOCK {i}: {page['doc_id']} p.{page['page_number']}]\n{text[:chars_per_page]}"
-            )
-            retry_context_pages.append(page)
-        if len(retry_parts) > len(context_parts):
-            retry_context = "\n\n---\n\n".join(retry_parts)
-            retry_prompt = _build_prompt(question, answer_type, retry_context)
-            raw2, ttft_ms2, total_ms2, in_tok2, out_tok2, model2 = _call(
-                retry_prompt, max_tokens=max_tokens, t0=_t0
-            )
-            if raw2 is not None:
-                clean_raw2, cited_indices2 = _parse_citation(raw2, len(retry_context_pages))
-                answer2 = _parse(clean_raw2, answer_type)
-                if answer2 is not None:
-                    answer = answer2
-                    context_pages = retry_context_pages
-                    cited_indices = cited_indices2
-                    in_tok += in_tok2
-                    out_tok += out_tok2
 
     total_ms_final = max(1, int((time.perf_counter() - _t0) * 1000))
 
