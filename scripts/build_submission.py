@@ -39,12 +39,27 @@ def _build_code_archive(archive_path: str):
     print(f"Code archive: {archive_path}")
 
 
+_PHASE_PATHS = {
+    "warmup": {
+        "docs_dir": "docs_corpus/warmup",
+        "questions_path": "data/warmup/questions.json",
+        "cache_dir": ".cache/warmup",
+    },
+    "final": {
+        "docs_dir": "docs_corpus/final",
+        "questions_path": "data/final/questions.json",
+        "cache_dir": ".cache/final",
+    },
+}
+
+
 def main(phase: str, config_path: str = "configs/rag.yaml", skip_validate: bool = False):
     cfg = load_config(config_path)
 
-    docs_dir = os.path.join(cfg["docs_dir"], phase)
-    questions_path = os.path.join(cfg["data_dir"], phase, "questions.json")
-    cache_dir = os.path.join(cfg["cache_dir"], phase)
+    paths = _PHASE_PATHS[phase]
+    docs_dir = paths["docs_dir"]
+    questions_path = paths["questions_path"]
+    cache_dir = paths["cache_dir"]
     os.makedirs(cache_dir, exist_ok=True)
 
     pages_cache = os.path.join(cache_dir, "pages.json")
