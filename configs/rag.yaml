@@ -4,10 +4,10 @@ data_dir: data
 cache_dir: .cache
 submission_path: submission.json
 code_archive_path: code_archive.zip
-architecture_summary: "BM25(top-20) + cross-encoder rerank(top-5) + Claude Haiku extraction. Phase-scoped corpus, 1-based PDF pages, deterministic fallback."
+architecture_summary: "BM25(top-12)+neighbor±1 → cross-encoder rerank(top-5) → Claude Haiku extraction. Dual-query for comparison questions. Law-identity+article page priority."
 
 retrieval:
-  top_k_bm25: 20
+  top_k_bm25: 15
   top_k_rerank: 5
   neighbor_pages: true
   use_reranker: true

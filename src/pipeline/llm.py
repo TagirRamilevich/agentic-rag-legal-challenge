@@ -10,8 +10,8 @@ FREE_TEXT_MAX = 280
 
 # Context size per answer type
 _TYPE_CONFIG = {
-    "bool":     {"max_pages": 3, "chars": 1000, "max_tokens": 20},
-    "boolean":  {"max_pages": 3, "chars": 1000, "max_tokens": 20},
+    "bool":     {"max_pages": 5, "chars": 800, "max_tokens": 20},
+    "boolean":  {"max_pages": 5, "chars": 800, "max_tokens": 20},
     "number":   {"max_pages": 2, "chars": 800,  "max_tokens": 20},
     "date":     {"max_pages": 2, "chars": 800,  "max_tokens": 20},
     "name":     {"max_pages": 2, "chars": 900,  "max_tokens": 50},
@@ -50,14 +50,15 @@ def _provider() -> Optional[str]:
     return None
 
 
-def _call(prompt: str, max_tokens: int = 256) -> Optional[str]:
+def _call(prompt: str, max_tokens: int = 256, use_strong_model: bool = False) -> Optional[str]:
     p = _provider()
     try:
         if p == "anthropic":
             import anthropic
+            model = "claude-sonnet-4-6" if use_strong_model else "claude-haiku-4-5-20251001"
             client = anthropic.Anthropic()
             msg = client.messages.create(
-                model="claude-haiku-4-5-20251001",
+                model=model,
                 max_tokens=max_tokens,
                 messages=[{"role": "user", "content": prompt}],
             )
@@ -65,11 +66,12 @@ def _call(prompt: str, max_tokens: int = 256) -> Optional[str]:
 
         if p == "openrouter":
             import requests as req
+            model = "anthropic/claude-sonnet-4-6" if use_strong_model else "anthropic/claude-haiku-4-5"
             r = req.post(
                 "https://openrouter.ai/api/v1/chat/completions",
                 headers={"Authorization": f"Bearer {os.getenv('OPENROUTER_API_KEY')}"},
                 json={
-                    "model": "anthropic/claude-haiku-4-5",
+                    "model": model,
                     "max_tokens": max_tokens,
                     "messages": [{"role": "user", "content": prompt}],
                 },
@@ -80,9 +82,10 @@ def _call(prompt: str, max_tokens: int = 256) -> Optional[str]:
 
         if p == "openai":
             import openai
+            model = "gpt-4o" if use_strong_model else "gpt-4o-mini"
             client = openai.OpenAI()
             r = client.chat.completions.create(
-                model="gpt-4o-mini",
+                model=model,
                 max_tokens=max_tokens,
                 messages=[{"role": "user", "content": prompt}],
             )
@@ -221,13 +224,21 @@ def _parse(raw: str, answer_type: str) -> Any:
     return raw or None
 
 
-def _find_source_pages(answer: Any, pages: list[dict]) -> list[dict]:
+def _find_source_pages(answer: Any, pages: list[dict], answer_type: str = "") -> list[dict]:
+    """Return only the 1–2 pages most likely to contain the answer.
+    Grounding is F-beta(β=2.5): recall-weighted but precision still penalised.
+    Returning fewer pages keeps precision high while recall stays 1 when we pick right.
+    """
     if answer is None or not pages:
         return []
     answer_str = str(answer).lower() if not isinstance(answer, list) else " ".join(answer).lower()
     words = [w for w in answer_str.split() if len(w) > 4][:12]
+
+    # For names/free_text allow up to 2 source pages (answer may span docs)
+    max_src = 2 if answer_type in ("names", "free_text") else 1
+
     if not words:
-        return pages
+        return pages[:max_src]
 
     scored = []
     for page in pages:
@@ -237,8 +248,8 @@ def _find_source_pages(answer: Any, pages: list[dict]) -> list[dict]:
             scored.append((hits, page))
     if scored:
         scored.sort(key=lambda x: -x[0])
-        return [p for _, p in scored]
-    return pages
+        return [p for _, p in scored[:max_src]]
+    return pages[:max_src]
 
 
 def answer_with_llm(
@@ -280,11 +291,32 @@ def answer_with_llm(
 
     answer = _parse(raw, answer_type)
 
+    # Retry with more pages if first attempt returns null (Habr: reparser fallback)
+    # Only for types where extra context clearly helps; bool/name can hallucinate on retry
+    if answer is None and answer_type in ("number", "date", "names") and len(pages) > max_pages:
+        retry_pages = min(max_pages + 3, len(pages))
+        retry_parts: list[str] = []
+        retry_context_pages: list[dict] = []
+        for page in pages[:retry_pages]:
+            text = page["text"].strip()
+            if not text:
+                continue
+            retry_parts.append(f"[{page['doc_id']} p.{page['page_number']}]\n{text[:chars_per_page]}")
+            retry_context_pages.append(page)
+        if len(retry_parts) > len(context_parts):
+            retry_context = "\n\n---\n\n".join(retry_parts)
+            retry_prompt = _build_prompt(question, answer_type, retry_context)
+            raw2 = _call(retry_prompt, max_tokens=max_tokens)
+            if raw2 is not None:
+                answer = _parse(raw2, answer_type)
+                if answer is not None:
+                    context_pages = retry_context_pages
+
     if answer is None:
         return None, []
 
     if answer_type == "free_text" and answer == FREE_TEXT_FALLBACK:
         return answer, []
 
-    source_pages = _find_source_pages(answer, context_pages)
+    source_pages = _find_source_pages(answer, context_pages, answer_type)
     return answer, source_pages

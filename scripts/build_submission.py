@@ -15,7 +15,7 @@ import yaml
 from src.pipeline.ingest import ingest_corpus, get_page_counts
 from src.pipeline.index import get_or_build_index
 from src.utils.chunker import chunk_pages
-from src.pipeline.retrieve import retrieve_pages
+from src.pipeline.retrieve import retrieve_pages, is_comparison_question
 from src.pipeline.rerank import rerank_pages
 from src.pipeline.llm import answer_with_llm
 from src.pipeline.answer import answer_question
@@ -90,14 +90,21 @@ def main(phase: str, config_path: str = "configs/rag.yaml", skip_validate: bool 
     null_count = 0
     llm_count = 0
 
+    # Pre-warm reranker so first question TTFT isn't distorted by model load
+    if use_reranker:
+        rerank_pages([{"text": "warmup", "doc_id": "x", "page_number": 1}], "warmup", top_k=1, model_name=reranker_model)
+
     print("[4/4] Answering questions ...")
     for i, q in enumerate(questions, 1):
         t0 = time.perf_counter()
 
-        retrieved = retrieve_pages(bm25, units, q["question"], top_k=top_k_bm25, add_neighbors=add_neighbors)
+        retrieved = retrieve_pages(bm25, units, q["question"], top_k=top_k_bm25, add_neighbors=add_neighbors, answer_type=q.get("answer_type", ""))
 
-        if use_reranker:
-            final_pages = rerank_pages(retrieved, q["question"], top_k=top_k_rerank, model_name=reranker_model)
+        is_cmp = is_comparison_question(q["question"])
+        _SKIP_RERANK = {"number", "date"}
+        need_rerank = use_reranker and (q.get("answer_type") not in _SKIP_RERANK or is_cmp)
+        if need_rerank:
+            final_pages = rerank_pages(retrieved, q["question"], top_k=top_k_rerank, model_name=reranker_model, max_per_doc=2 if is_cmp else 0)
         else:
             final_pages = retrieved[:top_k_rerank]
 

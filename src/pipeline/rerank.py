@@ -13,16 +13,42 @@ def _model(name: str):
     return _CACHE[name]
 
 
+def _apply_diversity(pages: list[dict], top_k: int, max_per_doc: int) -> list[dict]:
+    """Return up to top_k pages, capping each doc_id at max_per_doc."""
+    doc_counts: dict = {}
+    result = []
+    for page in pages:
+        did = page["doc_id"]
+        if doc_counts.get(did, 0) < max_per_doc:
+            result.append(page)
+            doc_counts[did] = doc_counts.get(did, 0) + 1
+        if len(result) >= top_k:
+            break
+    return result
+
+
 def rerank_pages(
     pages: list[dict],
     query: str,
     top_k: int = 5,
     model_name: str = "cross-encoder/ms-marco-MiniLM-L-6-v2",
+    max_per_doc: int = 0,
 ) -> list[dict]:
-    if not _AVAILABLE or not pages:
+    if not pages:
+        return []
+
+    if not _AVAILABLE:
+        # No cross-encoder: use BM25 ordering; apply diversity if requested
+        if max_per_doc > 0:
+            return _apply_diversity(pages, top_k, max_per_doc)
         return pages[:top_k]
+
     m = _model(model_name)
     pairs = [(query, p["text"][:512]) for p in pages]
     scores = m.predict(pairs, show_progress_bar=False)
-    ranked = sorted(zip(scores, pages), key=lambda x: -float(x[0]))
-    return [p for _, p in ranked[:top_k]]
+    ranked = [page for _, page in sorted(zip(scores, pages), key=lambda x: -float(x[0]))]
+
+    if max_per_doc > 0:
+        return _apply_diversity(ranked, top_k, max_per_doc)
+
+    return ranked[:top_k]

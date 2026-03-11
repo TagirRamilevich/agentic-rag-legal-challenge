@@ -23,22 +23,36 @@ load_dotenv()
 
 from src.pipeline.ingest import ingest_corpus
 from src.pipeline.index import get_or_build_index
-from src.pipeline.retrieve import retrieve_pages
+from src.pipeline.retrieve import retrieve_pages, is_comparison_question
 from src.pipeline.rerank import rerank_pages
 from src.pipeline.llm import answer_with_llm
 from src.pipeline.answer import answer_question
 
-DOCS_DIR = "reference/dataset_documents"
-CACHE_DIR = "data/reference_test/.cache"
-QUESTIONS_PATH = "reference/public_dataset.json"
+_PHASE_CONFIG = {
+    "warmup": {
+        "docs_dir": "reference/dataset_documents",
+        "cache_dir": "data/reference_test/.cache",
+        "questions_path": "reference/public_dataset.json",
+    },
+    "final": {
+        "docs_dir": "docs_corpus/final",
+        "cache_dir": "data/final/.cache",
+        "questions_path": "data/final/questions.json",
+    },
+}
 
 
-def main(use_llm: bool = True, use_rerank: bool = True, limit: int = 0, verbose: bool = False):
+def main(use_llm: bool = True, use_rerank: bool = True, limit: int = 0, verbose: bool = False, phase: str = "warmup"):
+    cfg = _PHASE_CONFIG[phase]
+    DOCS_DIR = cfg["docs_dir"]
+    CACHE_DIR = cfg["cache_dir"]
+    QUESTIONS_PATH = cfg["questions_path"]
+
     os.makedirs(CACHE_DIR, exist_ok=True)
     pages_cache = os.path.join(CACHE_DIR, "pages.json")
     index_cache = os.path.join(CACHE_DIR, "index.pkl")
 
-    print(f"Ingesting {DOCS_DIR} ...")
+    print(f"Phase: {phase} | Ingesting {DOCS_DIR} ...")
     pages = ingest_corpus(DOCS_DIR, pages_cache)
     print(f"  {len(pages)} pages from {len(set(p['doc_id'] for p in pages))} docs")
 
@@ -50,6 +64,11 @@ def main(use_llm: bool = True, use_rerank: bool = True, limit: int = 0, verbose:
 
     if limit:
         questions = questions[:limit]
+
+    # Pre-warm reranker model so first-question TTFT isn't distorted
+    if use_rerank:
+        from src.pipeline.rerank import rerank_pages as _rp
+        _rp([{"text": "warmup", "doc_id": "x", "page_number": 1}], "warmup", top_k=1)
 
     print(f"Answering {len(questions)} questions (llm={use_llm}, rerank={use_rerank}) ...\n")
 
@@ -65,10 +84,15 @@ def main(use_llm: bool = True, use_rerank: bool = True, limit: int = 0, verbose:
         q_id = q.get("question_id") or q.get("id", "")
         answer_type = q["answer_type"]
 
-        retrieved = retrieve_pages(bm25, pages, q["question"], top_k=20, add_neighbors=True)
+        retrieved = retrieve_pages(bm25, pages, q["question"], top_k=15, add_neighbors=True, answer_type=answer_type)
 
-        if use_rerank:
-            final = rerank_pages(retrieved, q["question"], top_k=5)
+        is_cmp = is_comparison_question(q["question"])
+        # Skip cross-encoder only for number/date: BM25+anchor already targets right page
+        # Keep reranker for bool/name/names/free_text where ranking quality matters
+        _SKIP_RERANK = {"number", "date"}
+        need_rerank = use_rerank and (answer_type not in _SKIP_RERANK or is_cmp)
+        if need_rerank:
+            final = rerank_pages(retrieved, q["question"], top_k=5, max_per_doc=2 if is_cmp else 0)
         else:
             final = retrieved[:5]
 
@@ -140,5 +164,6 @@ if __name__ == "__main__":
     parser.add_argument("--no-rerank", action="store_true")
     parser.add_argument("--limit", type=int, default=0, help="Test only first N questions")
     parser.add_argument("--verbose", action="store_true")
+    parser.add_argument("--phase", default="warmup", choices=["warmup", "final"])
     args = parser.parse_args()
-    main(use_llm=not args.no_llm, use_rerank=not args.no_rerank, limit=args.limit, verbose=args.verbose)
+    main(use_llm=not args.no_llm, use_rerank=not args.no_rerank, limit=args.limit, verbose=args.verbose, phase=args.phase)

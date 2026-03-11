@@ -19,7 +19,7 @@ import fitz
 
 from src.pipeline.ingest import ingest_corpus
 from src.pipeline.index import get_or_build_index
-from src.pipeline.retrieve import retrieve_pages
+from src.pipeline.retrieve import retrieve_pages, is_comparison_question
 from src.pipeline.rerank import rerank_pages
 from src.pipeline.llm import answer_with_llm
 from src.pipeline.answer import answer_question
@@ -274,8 +274,9 @@ def main(use_llm: bool = True, use_rerank: bool = True, verbose: bool = False):
         if gold_in_bm25:
             recall_bm25 += 1
 
+        is_cmp = is_comparison_question(tc["question"])
         if use_rerank:
-            final = rerank_pages(retrieved, tc["question"], top_k=5)
+            final = rerank_pages(retrieved, tc["question"], top_k=5, max_per_doc=2 if is_cmp else 0)
         else:
             final = retrieved[:5]
 
