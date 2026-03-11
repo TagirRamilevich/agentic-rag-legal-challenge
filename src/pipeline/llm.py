@@ -15,13 +15,13 @@ FREE_TEXT_MAX = 280
 # With context distillation, chars_per_page is the distilled paragraph budget
 # Boolean: needs more pages for comparison across 2 docs
 _TYPE_CONFIG = {
-    "bool":     {"max_pages": 5, "chars": 2500, "max_tokens": 30},
-    "boolean":  {"max_pages": 5, "chars": 2500, "max_tokens": 30},
-    "number":   {"max_pages": 3, "chars": 1200, "max_tokens": 30},
-    "date":     {"max_pages": 3, "chars": 1200, "max_tokens": 30},
+    "bool":     {"max_pages": 5, "chars": 2000, "max_tokens": 30},
+    "boolean":  {"max_pages": 5, "chars": 2000, "max_tokens": 30},
+    "number":   {"max_pages": 3, "chars": 1000, "max_tokens": 30},
+    "date":     {"max_pages": 3, "chars": 1000, "max_tokens": 30},
     "name":     {"max_pages": 4, "chars": 1200, "max_tokens": 60},
     "names":    {"max_pages": 4, "chars": 1500, "max_tokens": 160},
-    "free_text":{"max_pages": 3, "chars": 2000, "max_tokens": 350},
+    "free_text":{"max_pages": 3, "chars": 1500, "max_tokens": 350},
 }
 _DEFAULT_CONFIG = {"max_pages": 3, "chars": 1200, "max_tokens": 256}
 
@@ -193,12 +193,14 @@ _TYPE_INSTRUCTIONS = {
         "If genuinely not found: null" + _CITE_SUFFIX
     ),
     "free_text": (
-        f"Answer in 1-3 clear, precise sentences using ONLY the provided context. "
-        f"Maximum {FREE_TEXT_MAX} characters. Do not hallucinate or speculate. "
-        "Be specific: include relevant legal names, article numbers, amounts, dates. "
+        f"Answer in 1-3 precise sentences using ONLY the provided context. "
+        f"Maximum {FREE_TEXT_MAX} characters. Be concise but complete. "
+        "Include specific details: legal names, article/section numbers, dates, amounts. "
+        "Do NOT include information that is not stated in the context. "
+        "Do NOT speculate or provide general legal knowledge. "
         "After your answer write exactly: SOURCES: then comma-separated 0-based "
         "block numbers you used (e.g. SOURCES: 0,2). "
-        f"If the answer is absent from context, write only: {FREE_TEXT_FALLBACK}"
+        f"If the answer is absent from context, write EXACTLY: {FREE_TEXT_FALLBACK}"
     ),
 }
 
@@ -473,8 +475,6 @@ def answer_with_llm(
     max_pages = cfg["max_pages"]
     chars_per_page = cfg["chars"]
     max_tokens = cfg["max_tokens"]
-
-    # Keep is_comparison for potential future use
 
     context_parts: list[str] = []
     context_pages: list[dict] = []

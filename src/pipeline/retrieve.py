@@ -3,6 +3,55 @@ import numpy as np
 from src.pipeline.index import tokenize, embed_query, _EMBED_AVAILABLE, _DEFAULT_EMBED_MODEL
 from src.pipeline.query_expand import expand_query
 
+# ---------------------------------------------------------------------------
+# Document routing index: maps entity references → doc_ids
+# ---------------------------------------------------------------------------
+_DOC_ROUTE_CACHE: dict = {}
+
+
+def build_doc_routing_index(pages: list[dict]) -> dict:
+    """Build a lookup from case numbers and law names to doc_ids.
+    Uses page 1 text from each document for entity extraction."""
+    key = id(pages)
+    if key in _DOC_ROUTE_CACHE:
+        return _DOC_ROUTE_CACHE[key]
+
+    case_to_doc: dict[str, str] = {}
+    law_to_doc: dict[str, str] = {}
+
+    _case_p = re.compile(r"\b([A-Z]{2,5}\s+\d{3}/\d{4})\b")
+    _law_no_p = re.compile(r"\b((?:DIFC\s+)?Law No\.\s*\d+\s+of\s+\d{4})\b", re.IGNORECASE)
+    _law_name_p = re.compile(
+        r"\b((?:[A-Z][a-z]+\s+){1,5}(?:Law|Regulations?|Rules?)(?:\s+\d{4})?)\b"
+    )
+
+    for p in pages:
+        if p["page_number"] != 1:
+            continue
+        text = p["text"][:500]
+        doc_id = p["doc_id"]
+
+        # Extract case numbers
+        for case in _case_p.findall(text):
+            case_norm = case.upper().replace("  ", " ")
+            if case_norm not in case_to_doc:
+                case_to_doc[case_norm] = doc_id
+
+        # Extract law references
+        for law in _law_no_p.findall(text):
+            law_norm = law.strip()
+            if law_norm not in law_to_doc:
+                law_to_doc[law_norm] = doc_id
+
+        for law in _law_name_p.findall(text):
+            law_norm = law.strip()
+            if len(law_norm) > 8 and law_norm not in law_to_doc:
+                law_to_doc[law_norm] = doc_id
+
+    index = {"case": case_to_doc, "law": law_to_doc}
+    _DOC_ROUTE_CACHE[key] = index
+    return index
+
 _STOPWORDS = frozenset(
     {
         "what", "is", "are", "was", "were", "the", "a", "an", "of", "in", "on",
@@ -227,6 +276,24 @@ def retrieve_pages(
 
     from collections import Counter as _CounterDP
     _doc_page_counts = _CounterDP(p["doc_id"] for p in pages)
+
+    # Use document routing to boost known entities
+    doc_route = build_doc_routing_index(pages)
+    routed_doc_ids: set[str] = set()
+    for case_ref in _CASE_RE.findall(question):
+        case_norm = case_ref.upper().replace("  ", " ")
+        if case_norm in doc_route["case"]:
+            routed_doc_ids.add(doc_route["case"][case_norm])
+    for law_ref in _LAW_REF_RE.findall(question):
+        for key, doc_id in doc_route["law"].items():
+            if law_ref.lower() in key.lower() or key.lower() in law_ref.lower():
+                routed_doc_ids.add(doc_id)
+    # Add page 1 of routed docs to ensure they're in the result
+    for rdoc in routed_doc_ids:
+        j = doc_page_index.get((rdoc, 1))
+        if j is not None and j not in result:
+            result[j] = pages[j]
+            top_indices.append(j)
 
     if sub_queries:
         # For comparison questions: INTERLEAVE pages from each entity so that
