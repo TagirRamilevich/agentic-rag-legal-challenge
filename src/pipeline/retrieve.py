@@ -42,7 +42,9 @@ _COMPARISON_RE = re.compile(
     r"governed by (the )?same|"
     r"common to both|"
     r"any of the same|"
-    r"in both cases?)\b",
+    r"in both cases?|"
+    r"which (case|document|party|judgment) (has|had|is|was|were) (the )?(earlier|later|higher|lower|greater|smaller|first|last|same)|"
+    r"(between|comparing) .{3,60} (and|or|vs\.?|versus))\b",
     re.IGNORECASE,
 )
 
@@ -88,10 +90,13 @@ def _bm25_top(bm25, pages, query_str: str, top_k: int) -> list:
 
 def is_comparison_question(question: str) -> bool:
     """Return True if question compares two distinct entities requiring dual retrieval."""
+    # Two case numbers alone → always a comparison question
+    cases = _CASE_RE.findall(question)
+    if len(cases) >= 2:
+        return True
     if not _COMPARISON_RE.search(question):
         return False
     # Must also have two distinct references (case numbers OR law names)
-    cases = _CASE_RE.findall(question)
     if len(cases) >= 2:
         return True
     laws = _LAW_REF_RE.findall(question)
@@ -121,7 +126,9 @@ def retrieve_pages(
     answer_type: str = "",
 ) -> list[dict]:
     sub_queries = []
-    if _COMPARISON_RE.search(question):
+    # Two+ case refs always trigger dual-query even without explicit comparison language
+    _has_multi_case = len(_CASE_RE.findall(question)) >= 2
+    if _COMPARISON_RE.search(question) or _has_multi_case:
         sub_queries = _extract_multi_entity_queries(question)
 
     result: dict[int, dict] = {}
@@ -146,14 +153,23 @@ def retrieve_pages(
             per_q_early_lists.append(early)
             per_q_bm25_lists.append(idxs)
 
-        # Interleave: round-robin early pages from each entity first
+        # Interleave: round-robin early pages from each entity first.
+        # Tag p.1 of each entity as _priority so reranker won't drop them
+        # (title pages contain enactment dates needed for law comparison questions).
         max_early = max(len(e) for e in per_q_early_lists) if per_q_early_lists else 0
         for slot in range(max_early):
             for early_list in per_q_early_lists:
                 if slot < len(early_list):
                     j = early_list[slot]
-                    if j not in result:
-                        result[j] = pages[j]
+                    page_obj = pages[j]
+                    if slot == 0 and page_obj["page_number"] == 1:
+                        # First page of each entity: tag as priority
+                        tagged = dict(page_obj)
+                        tagged["_priority"] = True
+                        result[j] = tagged
+                    elif j not in result:
+                        result[j] = page_obj
+                    if j not in top_indices:
                         top_indices.append(j)
 
         # Then interleave BM25 pages from each entity
@@ -183,10 +199,89 @@ def retrieve_pages(
     # Priority pages to prepend (appear first in returned list for the fallback reranker)
     priority: list[int] = []
 
-    # Law-identity questions: include p.1-3 of the top matching document
+    # Article-specific questions: search for that article within the top doc.
+    # Tag with _priority so reranker pins them (cross-encoder can misrank article pages).
+    # Run article search BEFORE law-identity so article pages take precedence.
+    article_m = _ARTICLE_RE.search(question)
+    if article_m and main_indices:
+        article_num = article_m.group(1)
+        article_pat = re.compile(
+            rf"(?:\bArticle\s+{article_num}\b|(?:^|\n)\s*{article_num}[.(])",
+            re.IGNORECASE | re.MULTILINE,
+        )
+        # If question names a specific law, prefer that doc over the top BM25 result.
+        # Find the longest (most pages) doc whose p.1 mentions the named law
+        # (avoids short enactment notices that merely reference the law).
+        top_doc_id = pages[main_indices[0]]["doc_id"]
+        # Extract a multi-word law name: look for phrase "[Adj*] <CapWord>+ Law" in question
+        # Use longer match for better discrimination (e.g. "General Partnership Law" > "Partnership Law")
+        _law_phrase_re = re.compile(
+            r"\b((?:[A-Z][a-z]+\s+){1,4}(?:Law|Regulations?))(?:\s+(?:Amendment\s+)?(?:Law|Regulations?))?\b"
+        )
+        best_law_name: str = ""
+        for lm in _law_phrase_re.finditer(question):
+            phrase = lm.group(0).strip()
+            if len(phrase) > len(best_law_name):
+                best_law_name = phrase
+        if not best_law_name:
+            # Fallback to _LAW_REF_RE
+            named_law_m = _LAW_REF_RE.search(question)
+            if named_law_m:
+                best_law_name = named_law_m.group(0)
+        if best_law_name:
+            law_name = best_law_name.lower()
+            # Count pages per doc to prefer substantive docs over short notices
+            from collections import Counter as _Counter
+            doc_page_counts = _Counter(p["doc_id"] for p in pages)
+            best_doc: str = ""
+            best_match_len: int = 0
+            best_page_count: int = 0
+            for p in pages:
+                if p["page_number"] == 1:
+                    text_lower = p["text"].lower()
+                    # Score: length of matching prefix in title line
+                    if law_name in text_lower:
+                        cnt = doc_page_counts[p["doc_id"]]
+                        # Prefer exact match in title (first 100 chars) over body mentions
+                        in_title = law_name in text_lower[:100]
+                        score = (int(in_title) * 1000) + cnt
+                        if score > best_match_len:
+                            best_match_len = score
+                            best_doc = p["doc_id"]
+                            best_page_count = cnt
+            if best_doc:
+                top_doc_id = best_doc
+        article_priority_pages: list[int] = []
+        for idx, p in enumerate(pages):
+            if p["doc_id"] == top_doc_id and article_pat.search(p["text"]):
+                tagged = dict(p)
+                tagged["_priority"] = True
+                article_priority_pages.append(idx)
+                priority.append(idx)
+                result[idx] = tagged
+                if idx not in top_indices:
+                    top_indices.append(idx)
+                # After inserting the first article-match page, immediately add its
+                # successor (article sub-clauses often continue onto the next page).
+                # Always overwrite result entry in case BM25 added it without _priority.
+                if len(article_priority_pages) == 1:
+                    next_key = (p["doc_id"], p["page_number"] + 1)
+                    next_j = doc_page_index.get(next_key)
+                    if next_j is not None:
+                        ntagged = dict(pages[next_j])
+                        ntagged["_priority"] = True
+                        priority.append(next_j)
+                        result[next_j] = ntagged  # overwrite even if already present
+                        if next_j not in top_indices:
+                            top_indices.append(next_j)
+                if len(priority) >= 5:
+                    break
+
+    # Law-identity questions: include p.1-3 of the top matching document.
+    # Skip when article search already found specific pages (article is more precise).
     # (title pages always have the law number and enactment date)
     # Tag with _priority to prevent cross-encoder from pushing them out.
-    if _LAW_IDENTITY_RE.search(question) and main_indices:
+    if _LAW_IDENTITY_RE.search(question) and main_indices and not article_m:
         top_doc_id = pages[main_indices[0]]["doc_id"]
         for pg in (1, 2, 3):
             j = doc_page_index.get((top_doc_id, pg))
@@ -197,27 +292,6 @@ def retrieve_pages(
                 result[j] = tagged
                 if j not in top_indices:
                     top_indices.append(j)
-
-    # Article-specific questions: search for that article within the top doc.
-    # Tag with _priority so reranker pins them (cross-encoder can misrank article pages).
-    article_m = _ARTICLE_RE.search(question)
-    if article_m and main_indices:
-        article_num = article_m.group(1)
-        article_pat = re.compile(
-            rf"(?:\bArticle\s+{article_num}\b|(?:^|\n)\s*{article_num}[.(])",
-            re.IGNORECASE | re.MULTILINE,
-        )
-        top_doc_id = pages[main_indices[0]]["doc_id"]
-        for idx, p in enumerate(pages):
-            if p["doc_id"] == top_doc_id and article_pat.search(p["text"]):
-                tagged = dict(p)
-                tagged["_priority"] = True
-                priority.append(idx)
-                result[idx] = tagged
-                if idx not in top_indices:
-                    top_indices.append(idx)
-                if len(priority) >= 5:
-                    break
 
     # Keyword-within-document search: find pages in top doc that contain
     # content words from the question (for cases where TOC pages dominate BM25).
