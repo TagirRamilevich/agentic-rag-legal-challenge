@@ -234,8 +234,10 @@ def _find_source_pages(answer: Any, pages: list[dict], answer_type: str = "") ->
     answer_str = str(answer).lower() if not isinstance(answer, list) else " ".join(answer).lower()
     words = [w for w in answer_str.split() if len(w) > 4][:12]
 
-    # For names/free_text allow up to 2 source pages (answer may span docs)
-    max_src = 2 if answer_type in ("names", "free_text") else 1
+    # Webinar: if answer spans multiple pages, include all.
+    # β=2.5 means recall >> precision → returning 2 pages is safe.
+    # free_text/names can span docs; others usually 1 page but allow 2 for border cases.
+    max_src = 2
 
     if not words:
         return pages[:max_src]
