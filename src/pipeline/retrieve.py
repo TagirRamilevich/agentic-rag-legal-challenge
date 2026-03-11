@@ -75,7 +75,9 @@ def _extract_multi_entity_queries(question: str):
         if not dominated and ph not in unique_laws:
             unique_laws.append(ph)
     if len(unique_laws) >= 2:
-        return unique_laws[:2]
+        # Use the 2 longest phrases (most specific) rather than first 2
+        # e.g. "Employment Regulations" preferred over "Employment Law" when both present
+        return sorted(unique_laws, key=len, reverse=True)[:2]
 
     # Strategy 3: split around comparison connectives
     for splitter in [
@@ -180,24 +182,49 @@ def retrieve_pages(
         per_q = max(5, top_k // max(len(sub_queries), 1))
         per_q_early_lists: list[list[int]] = []
         per_q_bm25_lists: list[list[int]] = []
+        _date_q = re.search(
+            r"\b(come into force|commencement|enacted|same date|same year|enact)\b",
+            question, re.IGNORECASE,
+        )
         for sq in sub_queries:
             idxs = _bm25_top(bm25, pages, sq, per_q)
             early: list[int] = []
             if idxs:
                 top_doc_id = pages[idxs[0]]["doc_id"]
-                # For date/commencement comparison questions, prefer enactment notice
-                # (1-page doc) over larger amended-law docs that merely reference it.
-                # Only for date questions; admin/other questions need main law pages.
-                _date_q = re.search(
-                    r"\b(come into force|commencement|enacted|same date|same year|enact)\b",
-                    question, re.IGNORECASE,
-                )
+                # For date/commencement questions, prefer enactment notice (1-page doc).
                 if _date_q:
                     notice_doc = _find_enactment_notice_doc(
                         sq, pages, _doc_page_counts, doc_page_index
                     )
                     if notice_doc:
                         top_doc_id = notice_doc
+                else:
+                    # Title-match fallback: if BM25 top doc's p.1 title doesn't contain
+                    # the sub-query terms, find a doc whose title better matches.
+                    # Helps when BM25 picks a large doc that merely references the law
+                    # (e.g. "Employment Law" for "Employment Regulations" sub-query).
+                    top_p1_j = doc_page_index.get((top_doc_id, 1))
+                    top_title = pages[top_p1_j]["text"].lower()[:200] if top_p1_j is not None else ""
+                    sq_terms = [w for w in sq.lower().split() if len(w) > 3]
+                    title_match = sum(1 for t in sq_terms if t in top_title)
+                    if sq_terms and title_match < len(sq_terms) * 0.7:
+                        # Search for better doc: highest page-count doc whose p.1 title
+                        # contains the majority of sub-query terms.
+                        best_match_cnt = 0
+                        best_match_doc = ""
+                        best_match_pages = 0
+                        for p in pages:
+                            if p["page_number"] == 1:
+                                t_low = p["text"].lower()[:300]
+                                tc = sum(1 for t in sq_terms if t in t_low)
+                                pc = _doc_page_counts.get(p["doc_id"], 0)
+                                if tc >= len(sq_terms) * 0.7:
+                                    if tc > best_match_cnt or (tc == best_match_cnt and pc > best_match_pages):
+                                        best_match_cnt = tc
+                                        best_match_doc = p["doc_id"]
+                                        best_match_pages = pc
+                        if best_match_doc:
+                            top_doc_id = best_match_doc
                 for early_pg in (1, 2, 3, 4):
                     j = doc_page_index.get((top_doc_id, early_pg))
                     if j is not None:
@@ -412,6 +439,19 @@ def retrieve_pages(
                 result[j] = tagged
                 if j not in top_indices:
                     top_indices.append(j)
+
+    # "Same law number" / definition questions: pin pages that define "Law" with
+    # a law number (e.g. '"Law" means the Strata Title Law DIFC Law No. 5 of 2007').
+    # These pages are critical for comparing what law a term refers to across docs.
+    if re.search(r"\bsame law number\b|\brefer to the same law\b|\blaw number\b", question, re.IGNORECASE):
+        _lawdef_pat = re.compile(r'"[Ll]aw"\s+means\b|[Ll]aw\s+means\s+the\b|\bLaw No\.\s*\d', re.IGNORECASE)
+        for idx in list(result.keys()):
+            if _lawdef_pat.search(result[idx]["text"]):
+                if not result[idx].get("_priority"):
+                    tagged = dict(result[idx])
+                    tagged["_priority"] = True
+                    result[idx] = tagged
+                    priority.append(idx)
 
     # "Enactment notice" questions: ensure at least one actual enactment-notice
     # page (1-2 page doc) is in the result so the LLM can reason about commencement text.
