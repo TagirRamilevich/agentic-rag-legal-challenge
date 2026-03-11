@@ -95,6 +95,9 @@ def main(use_llm: bool = True, use_rerank: bool = True, limit: int = 0, verbose:
         need_rerank = use_rerank and is_cmp
         if need_rerank:
             final = rerank_pages(retrieved, q["question"], top_k=5, max_per_doc=2 if is_cmp else 0)
+        elif is_cmp:
+            # Comparison without reranker: apply diversity (max 3 per doc)
+            final = rerank_pages(retrieved, q["question"], top_k=5, max_per_doc=3)
         else:
             final = retrieved[:5]
 

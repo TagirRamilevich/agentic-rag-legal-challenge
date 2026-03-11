@@ -120,6 +120,10 @@ def main(phase: str, config_path: str = "configs/rag.yaml", skip_validate: bool 
         need_rerank = use_reranker and is_cmp
         if need_rerank:
             final_pages = rerank_pages(retrieved, q["question"], top_k=top_k_rerank, model_name=reranker_model, max_per_doc=2 if is_cmp else 0)
+        elif is_cmp:
+            # For comparison questions without reranker: apply diversity to ensure
+            # pages from multiple docs are included (max 3 per doc)
+            final_pages = rerank_pages(retrieved, q["question"], top_k=top_k_rerank, max_per_doc=3)
         else:
             final_pages = retrieved[:top_k_rerank]
 

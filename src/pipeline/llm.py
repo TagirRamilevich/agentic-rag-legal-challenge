@@ -15,13 +15,13 @@ FREE_TEXT_MAX = 280
 # With context distillation, chars_per_page is the distilled paragraph budget
 # Boolean: needs more pages for comparison across 2 docs
 _TYPE_CONFIG = {
-    "bool":     {"max_pages": 5, "chars": 2000, "max_tokens": 30},
-    "boolean":  {"max_pages": 5, "chars": 2000, "max_tokens": 30},
+    "bool":     {"max_pages": 5, "chars": 1500, "max_tokens": 30},
+    "boolean":  {"max_pages": 5, "chars": 1500, "max_tokens": 30},
     "number":   {"max_pages": 3, "chars": 1000, "max_tokens": 30},
     "date":     {"max_pages": 3, "chars": 1000, "max_tokens": 30},
-    "name":     {"max_pages": 4, "chars": 1500, "max_tokens": 60},
-    "names":    {"max_pages": 4, "chars": 1800, "max_tokens": 160},
-    "free_text":{"max_pages": 4, "chars": 2000, "max_tokens": 350},
+    "name":     {"max_pages": 4, "chars": 1200, "max_tokens": 60},
+    "names":    {"max_pages": 4, "chars": 1500, "max_tokens": 160},
+    "free_text":{"max_pages": 4, "chars": 1800, "max_tokens": 350},
 }
 _DEFAULT_CONFIG = {"max_pages": 3, "chars": 1200, "max_tokens": 256}
 
@@ -258,18 +258,11 @@ def _distill_page(text: str, question: str, max_chars: int) -> str:
 
 
 _BOOL_COMPARISON_INSTRUCTION = (
-    "This is a comparison question. Follow these steps:\n"
-    "1) Extract the relevant fact from Entity/Document 1\n"
-    "2) Extract the relevant fact from Entity/Document 2\n"
-    "3) Compare them and conclude: true (same/match), false (different/no match), or null (info missing from BOTH)\n\n"
-    "IMPORTANT: If you found information about BOTH entities, you MUST answer true or false — never null.\n"
-    "Return null ONLY if one or both entities have NO information at all in the context.\n"
-    "If the entities/parties/judges are different, the answer is false.\n\n"
-    "Format your response as:\n"
-    "Entity 1: [fact]\n"
-    "Entity 2: [fact]\n"
-    "ANSWER: true/false/null\n"
-    "CITE: [block numbers]"
+    "Compare the two entities/cases/laws mentioned in the question.\n"
+    "If both facts are found and they MATCH → true. If they DIFFER → false.\n"
+    "Return null ONLY if the needed information is completely absent.\n"
+    "IMPORTANT: If you found info about BOTH entities, you MUST answer true or false.\n"
+    "Format: E1:[fact] E2:[fact] ANSWER:true/false/null CITE:0,1"
 )
 
 
@@ -289,14 +282,19 @@ def _build_prompt(question: str, answer_type: str, context: str,
 
 
 def _parse_citation(raw: str, num_pages: int) -> tuple[str, list[int]]:
-    """Parse 'CITE:0,2' or 'SOURCES: 0,1,2' suffix from LLM response.
+    """Parse 'CITE:0,2' or 'SOURCES: 0,1,2' from LLM response.
     Returns (cleaned_text, cited_block_indices)."""
     text = raw.strip()
     indices: list[int] = []
-    # Try CITE: first, then SOURCES:
+    # Try CITE: first (at end or anywhere), then SOURCES:
     m = re.search(r"\bCITE:\s*([\d,\s]+)\s*$", text, re.IGNORECASE)
     if not m:
         m = re.search(r"\bSOURCES?:\s*([\d,\s]+)\s*$", text, re.IGNORECASE)
+    if not m:
+        # Try CITE: not at end (LLM may add text after citation)
+        m = re.search(r"\bCITE:\s*([\d,\s]+)", text, re.IGNORECASE)
+    if not m:
+        m = re.search(r"\bSOURCES?:\s*([\d,\s]+)", text, re.IGNORECASE)
     if m:
         idx_strs = re.findall(r"\d+", m.group(1))
         indices = [int(i) for i in idx_strs if int(i) < num_pages]
@@ -316,10 +314,17 @@ def _parse(raw: str, answer_type: str) -> Any:
         return None
 
     if answer_type in ("bool", "boolean"):
-        low = raw.lower()
+        low = raw.lower().strip()
         if low in ("true", "yes"):
             return True
         if low in ("false", "no"):
+            return False
+        # Check first word/line (LLM may add explanation after the answer)
+        first_word = low.split()[0] if low.split() else ""
+        first_line = low.split("\n")[0].strip()
+        if first_word in ("true", "yes") or first_line in ("true", "yes"):
+            return True
+        if first_word in ("false", "no") or first_line in ("false", "no"):
             return False
         # Only infer from regex if strong signal; otherwise null
         t = len(_TRUE_RE.findall(raw))
@@ -511,9 +516,34 @@ def answer_with_llm(
     chars_per_page = cfg["chars"]
     max_tokens = cfg["max_tokens"]
 
+    # For comparison questions: ensure pages from multiple docs are included
+    # (otherwise all max_pages slots may be filled by one doc)
+    if is_comparison and len(pages) > max_pages:
+        selected: list[dict] = []
+        doc_counts: dict[str, int] = {}
+        # First pass: take up to 3 pages per doc, round-robin style
+        max_per_doc_cmp = 3
+        for p in pages:
+            did = p["doc_id"]
+            if doc_counts.get(did, 0) < max_per_doc_cmp:
+                selected.append(p)
+                doc_counts[did] = doc_counts.get(did, 0) + 1
+            if len(selected) >= max_pages:
+                break
+        # If we still have room and missed pages, fill up
+        if len(selected) < max_pages:
+            for p in pages:
+                if p not in selected:
+                    selected.append(p)
+                    if len(selected) >= max_pages:
+                        break
+        page_list = selected
+    else:
+        page_list = pages[:max_pages]
+
     context_parts: list[str] = []
     context_pages: list[dict] = []
-    for i, page in enumerate(pages[:max_pages]):
+    for i, page in enumerate(page_list):
         text = page["text"].strip()
         if not text:
             continue
@@ -534,7 +564,7 @@ def answer_with_llm(
     # Comparison booleans get chain-of-thought prompt with higher max_tokens
     _effective_max_tokens = max_tokens
     if is_comparison and answer_type in ("bool", "boolean"):
-        _effective_max_tokens = 120  # Room for Entity1/Entity2/ANSWER/CITE
+        _effective_max_tokens = 150  # Room for E1/E2/ANSWER/CITE
     prompt = _build_prompt(question, answer_type, context, is_comparison=is_comparison)
     use_strong = False
 

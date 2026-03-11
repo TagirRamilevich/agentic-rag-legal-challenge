@@ -293,13 +293,32 @@ def retrieve_pages(
         case_norm = case_ref.upper().replace("  ", " ")
         if case_norm in doc_route["case"]:
             routed_doc_ids.add(doc_route["case"][case_norm])
-    for law_ref in _LAW_REF_RE.findall(question):
-        # Skip overly broad matches like "DIFC Law" that match everything
+    # Extract multi-word law phrases from question (more specific than _LAW_REF_RE)
+    _mw_law_q_re = re.compile(
+        r"\b((?:[A-Z][a-z]+\s+){1,5}(?:Law|Regulations?)(?:\s+Amendment\s+Law)?)\b"
+    )
+    law_phrases_q = list(dict.fromkeys(m.group(0) for m in _mw_law_q_re.finditer(question)))
+    # Also add "Law No. X of Y" patterns
+    _law_no_q_re = re.compile(r"\bLaw No\.\s*\d+\s+of\s+\d{4}\b", re.IGNORECASE)
+    law_phrases_q.extend(m.group(0) for m in _law_no_q_re.finditer(question))
+    for law_ref in law_phrases_q:
+        # Skip overly broad matches
         if len(law_ref) < 10 and not re.match(r"Law No\.", law_ref, re.IGNORECASE):
             continue
+        # Prefer exact match or longest overlapping key
+        best_key = ""
+        best_doc = ""
         for key, doc_id in doc_route["law"].items():
+            if law_ref.lower() == key.lower():
+                best_key = key
+                best_doc = doc_id
+                break  # exact match → done
             if law_ref.lower() in key.lower() or key.lower() in law_ref.lower():
-                routed_doc_ids.add(doc_id)
+                if len(key) > len(best_key):
+                    best_key = key
+                    best_doc = doc_id
+        if best_doc:
+            routed_doc_ids.add(best_doc)
     # Add page 1 of routed docs to ensure they're in the result
     for rdoc in routed_doc_ids:
         j = doc_page_index.get((rdoc, 1))
@@ -416,6 +435,12 @@ def retrieve_pages(
     article_m = _ARTICLE_RE.search(question)
     if article_m and main_indices:
         article_num = article_m.group(1)
+        # Check for sub-article reference like "9(9)(a)" for more specific matching
+        _sub_art_m = re.search(rf"\bArticle\s+{article_num}\s*(\(\d+\)(?:\([a-z]\))?)", question, re.IGNORECASE)
+        sub_article_pat = None
+        if _sub_art_m:
+            sub_ref = re.escape(_sub_art_m.group(1))
+            sub_article_pat = re.compile(rf"(?:\b{article_num}\s*{sub_ref}|{sub_ref})", re.IGNORECASE)
         article_pat = re.compile(
             rf"(?:\bArticle\s+{article_num}\b|(?:^|\n)\s*{article_num}[.(])",
             re.IGNORECASE | re.MULTILINE,
@@ -459,35 +484,51 @@ def retrieve_pages(
                             best_page_count = cnt
             if best_doc:
                 top_doc_id = best_doc
-        article_priority_pages: list[int] = []
+        # Collect all article-matching pages; sort by relevance to question
+        _art_q_words = set(
+            w.lower() for w in re.findall(r"[a-zA-Z]{4,}", question)
+            if w.lower() not in _STOPWORDS
+        )
+        _art_candidates: list[tuple[int, int]] = []  # (relevance_score, idx)
         for idx, p in enumerate(pages):
             if p["doc_id"] == top_doc_id and article_pat.search(p["text"]):
-                # Skip TOC/contents pages — they mention article numbers but don't contain the text
                 _is_toc = "CONTENTS" in p["text"][:300] or "TABLE OF CONTENTS" in p["text"][:300]
                 if _is_toc:
                     continue
-                tagged = dict(p)
-                tagged["_priority"] = True
-                article_priority_pages.append(idx)
-                priority.append(idx)
-                result[idx] = tagged
-                if idx not in top_indices:
-                    top_indices.append(idx)
-                # After inserting the first article-match page, immediately add its
-                # successor (article sub-clauses often continue onto the next page).
-                # Always overwrite result entry in case BM25 added it without _priority.
-                if len(article_priority_pages) == 1:
-                    next_key = (p["doc_id"], p["page_number"] + 1)
-                    next_j = doc_page_index.get(next_key)
-                    if next_j is not None:
-                        ntagged = dict(pages[next_j])
-                        ntagged["_priority"] = True
-                        priority.append(next_j)
-                        result[next_j] = ntagged  # overwrite even if already present
-                        if next_j not in top_indices:
-                            top_indices.append(next_j)
-                if len(priority) >= 5:
-                    break
+                # Score by keyword overlap with question (higher = more relevant)
+                text_lower = p["text"].lower()
+                kw_score = sum(1 for w in _art_q_words if w in text_lower)
+                # Bonus for sub-article match
+                if sub_article_pat and sub_article_pat.search(p["text"]):
+                    kw_score += 5
+                _art_candidates.append((kw_score, idx))
+        # Sort: most relevant pages first
+        _art_candidates.sort(key=lambda x: (-x[0], pages[x[1]]["page_number"]))
+
+        article_priority_pages: list[int] = []
+        for _, idx in _art_candidates:
+            p = pages[idx]
+            tagged = dict(p)
+            tagged["_priority"] = True
+            article_priority_pages.append(idx)
+            priority.append(idx)
+            result[idx] = tagged
+            if idx not in top_indices:
+                top_indices.append(idx)
+            # After inserting the first article-match page, immediately add its
+            # successor (article sub-clauses often continue onto the next page).
+            if len(article_priority_pages) == 1:
+                next_key = (p["doc_id"], p["page_number"] + 1)
+                next_j = doc_page_index.get(next_key)
+                if next_j is not None:
+                    ntagged = dict(pages[next_j])
+                    ntagged["_priority"] = True
+                    priority.append(next_j)
+                    result[next_j] = ntagged
+                    if next_j not in top_indices:
+                        top_indices.append(next_j)
+            if len(priority) >= 5:
+                break
 
     # "Administered by" questions: pin pages whose text explicitly states
     # which entity administers the law (these are often on page 4-5, not p.1).
@@ -540,7 +581,8 @@ def retrieve_pages(
     # Tag with _priority to prevent cross-encoder from pushing them out.
     _is_metadata_q = bool(re.search(
         r"\b(what is the (?:law )?number|what is the title|official (?:law )?number|"
-        r"enacted\b|commencement date|date (?:of|was) .{0,20}enacted|cover page)\b",
+        r"enacted\b|commencement date|date (?:of|was) .{0,20}enacted|cover page|"
+        r"latest.{0,20}(?:law|amend)|(?:law|amend).{0,20}latest|amended by)\b",
         question, re.IGNORECASE,
     ))
     if _is_metadata_q and main_indices and not article_m:
