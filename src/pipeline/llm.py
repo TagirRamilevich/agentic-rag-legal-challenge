@@ -11,14 +11,16 @@ FREE_TEXT_FALLBACK = "There is no information on this question in the provided d
 FREE_TEXT_MAX = 280
 
 # Context size per answer type
+# max_tokens includes room for CITE: suffix (~10 tokens)
+# Boolean needs more context for comparison reasoning across 2 docs
 _TYPE_CONFIG = {
-    "bool":     {"max_pages": 5, "chars": 3000, "max_tokens": 20},
-    "boolean":  {"max_pages": 5, "chars": 3000, "max_tokens": 20},
-    "number":   {"max_pages": 3, "chars": 3000, "max_tokens": 20},
-    "date":     {"max_pages": 3, "chars": 2000, "max_tokens": 20},
-    "name":     {"max_pages": 4, "chars": 2500, "max_tokens": 50},
-    "names":    {"max_pages": 4, "chars": 2500, "max_tokens": 150},
-    "free_text":{"max_pages": 4, "chars": 3000, "max_tokens": 300},
+    "bool":     {"max_pages": 5, "chars": 2500, "max_tokens": 30},
+    "boolean":  {"max_pages": 5, "chars": 2500, "max_tokens": 30},
+    "number":   {"max_pages": 3, "chars": 2500, "max_tokens": 30},
+    "date":     {"max_pages": 3, "chars": 2000, "max_tokens": 30},
+    "name":     {"max_pages": 4, "chars": 2000, "max_tokens": 60},
+    "names":    {"max_pages": 4, "chars": 2000, "max_tokens": 160},
+    "free_text":{"max_pages": 3, "chars": 2000, "max_tokens": 350},
 }
 _DEFAULT_CONFIG = {"max_pages": 3, "chars": 1200, "max_tokens": 256}
 
@@ -131,46 +133,59 @@ def _call(
     return None, total_ms, total_ms, 0, 0, "unknown"
 
 
+# Citation suffix appended to all type instructions
+_CITE_SUFFIX = (
+    " End with CITE: followed by the 0-based block number(s) you used "
+    "(e.g. CITE:0 or CITE:0,2). Cite ONLY blocks containing evidence for your answer."
+)
+
 _TYPE_INSTRUCTIONS = {
     "number": (
         "Return ONLY a single numeric value (integer or decimal). "
         "No units, no currency symbols, no extra text. "
-        "Examples: 1500000 or 3.5 or 42. "
-        "If not found in context: null"
+        "Numbers in parentheses like (5,000) mean negative: -5000. "
+        "Convert thousands/millions: '1.5 million' → 1500000. "
+        "If multiple numbers appear, choose the one that directly answers the question. "
+        "Examples: 1500000 or 3.5 or 42 or -5000. "
+        "If not found in context: null" + _CITE_SUFFIX
     ),
     "bool": (
         "Return ONLY the word true, false, or null (lowercase, nothing else). "
-        "true = yes / granted / approved / allowed / upheld / same. "
-        "false = no / dismissed / denied / rejected / refused / different. "
-        "null = the context does not clearly and directly answer this yes/no question. "
-        "IMPORTANT: Only return true or false if you find CLEAR, DIRECT evidence. "
-        "When in doubt or if the topic is absent, return null."
+        "true = yes / same / granted / approved / allowed / upheld / confirmed. "
+        "false = no / different / dismissed / denied / rejected / refused. "
+        "For comparison questions (e.g. 'same judge', 'same year', 'same party'): "
+        "compare the specific facts from each document block carefully. "
+        "If the two values clearly differ, return false. "
+        "If they clearly match, return true. "
+        "Only return null if the context truly lacks information to answer." + _CITE_SUFFIX
     ),
     "boolean": (
         "Return ONLY the word true, false, or null (lowercase, nothing else). "
-        "true = yes / granted / approved / allowed / upheld / same. "
-        "false = no / dismissed / denied / rejected / refused / different. "
-        "null = the context does not clearly and directly answer this yes/no question. "
-        "IMPORTANT: Only return true or false if you find CLEAR, DIRECT evidence. "
-        "When in doubt or if the topic is absent, return null."
+        "true = yes / same / granted / approved / allowed / upheld / confirmed. "
+        "false = no / different / dismissed / denied / rejected / refused. "
+        "For comparison questions (e.g. 'same judge', 'same year', 'same party'): "
+        "compare the specific facts from each document block carefully. "
+        "If the two values clearly differ, return false. "
+        "If they clearly match, return true. "
+        "Only return null if the context truly lacks information to answer." + _CITE_SUFFIX
     ),
     "date": (
         "Return ONLY a date in YYYY-MM-DD format. "
         "Convert any date format (e.g. '15 March 2024' → '2024-03-15'). "
-        "If not found in context: null"
+        "If not found in context: null" + _CITE_SUFFIX
     ),
     "name": (
         "Return ONLY the name or entity as a short phrase. "
         "Include the full legal name if available. "
         "No explanation, no extra text. "
-        "If not found in context: null"
+        "If not found in context: null" + _CITE_SUFFIX
     ),
     "names": (
         "Return ONLY a JSON array of strings. "
         'Example: ["John Smith", "Acme Corp Ltd"]. '
         "No markdown code blocks. No explanations. "
         "Include every person, company or entity that answers the question. "
-        "If genuinely not found: null"
+        "If genuinely not found: null" + _CITE_SUFFIX
     ),
     "free_text": (
         f"Answer in 1-3 clear, precise sentences using ONLY the provided context. "
@@ -194,15 +209,26 @@ def _build_prompt(question: str, answer_type: str, context: str) -> str:
     )
 
 
-def _parse_free_text_sources(raw: str, num_pages: int) -> tuple[str, list[int]]:
-    """Parse 'SOURCES: 0,1,2' suffix from free_text response. Returns (answer, page_indices)."""
-    m = re.search(r"\bSOURCES?:\s*([\d,\s]+)\s*$", raw.strip(), re.IGNORECASE)
+def _parse_citation(raw: str, num_pages: int) -> tuple[str, list[int]]:
+    """Parse 'CITE:0,2' or 'SOURCES: 0,1,2' suffix from LLM response.
+    Returns (cleaned_text, cited_block_indices)."""
+    text = raw.strip()
     indices: list[int] = []
+    # Try CITE: first, then SOURCES:
+    m = re.search(r"\bCITE:\s*([\d,\s]+)\s*$", text, re.IGNORECASE)
+    if not m:
+        m = re.search(r"\bSOURCES?:\s*([\d,\s]+)\s*$", text, re.IGNORECASE)
     if m:
         idx_strs = re.findall(r"\d+", m.group(1))
         indices = [int(i) for i in idx_strs if int(i) < num_pages]
-        raw = raw[: m.start()].strip()
-    return raw[:FREE_TEXT_MAX], indices
+        text = text[: m.start()].strip()
+    return text, indices
+
+
+def _parse_free_text_sources(raw: str, num_pages: int) -> tuple[str, list[int]]:
+    """Parse citation from free_text response. Returns (answer, page_indices)."""
+    text, indices = _parse_citation(raw, num_pages)
+    return text[:FREE_TEXT_MAX], indices
 
 
 def _parse(raw: str, answer_type: str) -> Any:
@@ -438,22 +464,26 @@ def answer_with_llm(
         elapsed = max(1, int((time.perf_counter() - _t0) * 1000))
         return ans, used, elapsed, elapsed, 0, 0, "deterministic-fallback"
 
-    # For free_text: parse LLM-cited source blocks
+    # Parse citation from LLM response (works for all types)
+    clean_raw, cited_indices = _parse_citation(raw, len(context_pages))
+
+    # For free_text: use SOURCES-based citation
     if answer_type == "free_text":
-        text, cited_indices = _parse_free_text_sources(raw, len(context_pages))
+        text, ft_indices = _parse_free_text_sources(raw, len(context_pages))
         answer = _parse(text, answer_type)
         if answer == FREE_TEXT_FALLBACK or answer is None:
             total_ms2 = max(1, int((time.perf_counter() - _t0) * 1000))
             return FREE_TEXT_FALLBACK if answer_type == "free_text" else None, [], ttft_ms, total_ms2, in_tok, out_tok, model
         # Use cited pages if valid; fallback to top-2
-        if cited_indices:
-            used_pages = [context_pages[i] for i in cited_indices]
+        if ft_indices:
+            used_pages = [context_pages[i] for i in ft_indices]
         else:
             used_pages = context_pages[:2]
         total_ms2 = max(1, int((time.perf_counter() - _t0) * 1000))
         return answer, used_pages, ttft_ms, total_ms2, in_tok, out_tok, model
 
-    answer = _parse(raw, answer_type)
+    # For non-free_text: parse answer from cleaned text (CITE suffix removed)
+    answer = _parse(clean_raw, answer_type)
 
     # Retry with more pages if first attempt returns null
     if answer is None and answer_type in ("number", "date", "names") and len(pages) > max_pages:
@@ -475,10 +505,12 @@ def answer_with_llm(
                 retry_prompt, max_tokens=max_tokens, t0=_t0
             )
             if raw2 is not None:
-                answer2 = _parse(raw2, answer_type)
+                clean_raw2, cited_indices2 = _parse_citation(raw2, len(retry_context_pages))
+                answer2 = _parse(clean_raw2, answer_type)
                 if answer2 is not None:
                     answer = answer2
                     context_pages = retry_context_pages
+                    cited_indices = cited_indices2
                     in_tok += in_tok2
                     out_tok += out_tok2
 
@@ -487,5 +519,10 @@ def answer_with_llm(
     if answer is None:
         return None, [], ttft_ms, total_ms_final, in_tok, out_tok, model
 
-    source_pages = _find_source_pages(answer, context_pages, answer_type)
+    # Use LLM-cited pages for precise grounding; fallback to top-2
+    if cited_indices:
+        source_pages = [context_pages[i] for i in cited_indices]
+    else:
+        # Fallback: use _find_source_pages or top-2
+        source_pages = _find_source_pages(answer, context_pages, answer_type)
     return answer, source_pages, ttft_ms, total_ms_final, in_tok, out_tok, model

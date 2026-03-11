@@ -7,5 +7,7 @@ Pillow>=10.0.0
 pytesseract>=0.3.10
 anthropic>=0.40.0
 
-# Optional: cross-encoder reranking (~500MB download on first run)
-# sentence-transformers>=2.6.0
+# sentence-transformers: used for cross-encoder reranking AND dense embedding retrieval
+# (~500MB download on first run; all-MiniLM-L6-v2 for embeddings, ms-marco-MiniLM for reranking)
+sentence-transformers>=2.6.0
+numpy>=1.24.0

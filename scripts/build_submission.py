@@ -87,7 +87,7 @@ def main(phase: str, config_path: str = "configs/rag.yaml", skip_validate: bool 
         print("[2/4] Building / loading BM25 index ...")
         units = pages
 
-    bm25, units = get_or_build_index(units, index_cache)
+    bm25, units, embeddings = get_or_build_index(units, index_cache)
 
     print(f"[3/4] Loading questions from {questions_path} ...")
     with open(questions_path, encoding="utf-8") as f:
@@ -113,7 +113,7 @@ def main(phase: str, config_path: str = "configs/rag.yaml", skip_validate: bool 
     for i, q in enumerate(questions, 1):
         t0 = time.perf_counter()
 
-        retrieved = retrieve_pages(bm25, units, q["question"], top_k=top_k_bm25, add_neighbors=add_neighbors, answer_type=q.get("answer_type", ""))
+        retrieved = retrieve_pages(bm25, units, q["question"], top_k=top_k_bm25, add_neighbors=add_neighbors, answer_type=q.get("answer_type", ""), embeddings=embeddings)
 
         is_cmp = is_comparison_question(q["question"])
         _SKIP_RERANK = {"number", "date"}

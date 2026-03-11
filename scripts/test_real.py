@@ -57,7 +57,9 @@ def main(use_llm: bool = True, use_rerank: bool = True, limit: int = 0, verbose:
     print(f"  {len(pages)} pages from {len(set(p['doc_id'] for p in pages))} docs")
 
     print("Building / loading BM25 index ...")
-    bm25, pages = get_or_build_index(pages, index_cache)
+    result = get_or_build_index(pages, index_cache)
+    bm25, pages = result[0], result[1]
+    embeddings = result[2] if len(result) > 2 else None
 
     with open(QUESTIONS_PATH, encoding="utf-8") as f:
         questions = json.load(f)
@@ -84,7 +86,7 @@ def main(use_llm: bool = True, use_rerank: bool = True, limit: int = 0, verbose:
         q_id = q.get("question_id") or q.get("id", "")
         answer_type = q["answer_type"]
 
-        retrieved = retrieve_pages(bm25, pages, q["question"], top_k=15, add_neighbors=True, answer_type=answer_type)
+        retrieved = retrieve_pages(bm25, pages, q["question"], top_k=15, add_neighbors=True, answer_type=answer_type, embeddings=embeddings)
 
         is_cmp = is_comparison_question(q["question"])
         # Skip cross-encoder only for number/date: BM25+anchor already targets right page

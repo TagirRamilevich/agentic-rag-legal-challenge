@@ -1,5 +1,6 @@
 import re
-from src.pipeline.index import tokenize
+import numpy as np
+from src.pipeline.index import tokenize, embed_query, _EMBED_AVAILABLE, _DEFAULT_EMBED_MODEL
 from src.pipeline.query_expand import expand_query
 
 _STOPWORDS = frozenset(
@@ -106,6 +107,56 @@ def _bm25_top(bm25, pages, query_str: str, top_k: int) -> list:
     return top_indices
 
 
+def _embedding_top(
+    embeddings: np.ndarray,
+    query_str: str,
+    top_k: int,
+    model_name: str = _DEFAULT_EMBED_MODEL,
+) -> list[int]:
+    """Return top-k page indices by cosine similarity to query embedding."""
+    q_vec = embed_query(query_str, model_name)          # (1, D)
+    scores = (embeddings @ q_vec.T).flatten()            # (N,)
+    ranked = np.argsort(-scores)[:top_k]
+    return ranked.tolist()
+
+
+def _rrf_fuse(
+    *rankings: list[int],
+    top_k: int = 20,
+    k: int = 60,
+) -> list[int]:
+    """Reciprocal Rank Fusion over multiple ranked lists.
+
+    For each index, RRF score = sum over lists of 1 / (k + rank).
+    k=60 is the standard default from the RRF paper.
+    Returns fused ranking (top_k indices).
+    """
+    scores: dict[int, float] = {}
+    for ranking in rankings:
+        for rank, idx in enumerate(ranking):
+            scores[idx] = scores.get(idx, 0.0) + 1.0 / (k + rank + 1)
+    fused = sorted(scores, key=lambda i: -scores[i])
+    return fused[:top_k]
+
+
+def _hybrid_top(
+    bm25,
+    pages,
+    embeddings,
+    query_str: str,
+    top_k: int,
+) -> list[int]:
+    """Hybrid retrieval: BM25 + embedding search fused with RRF.
+
+    Falls back to BM25-only if embeddings are None.
+    """
+    bm25_indices = _bm25_top(bm25, pages, query_str, top_k * 2)
+    if embeddings is None:
+        return bm25_indices[:top_k]
+    emb_indices = _embedding_top(embeddings, query_str, top_k * 2)
+    return _rrf_fuse(bm25_indices, emb_indices, top_k=top_k)
+
+
 def is_comparison_question(question: str) -> bool:
     """Return True if question compares two distinct entities requiring dual retrieval."""
     # Two case numbers alone → always a comparison question
@@ -162,6 +213,7 @@ def retrieve_pages(
     top_k: int = 20,
     add_neighbors: bool = True,
     answer_type: str = "",
+    embeddings=None,
 ) -> list[dict]:
     sub_queries = []
     # Two+ case refs always trigger dual-query even without explicit comparison language
@@ -187,7 +239,7 @@ def retrieve_pages(
             question, re.IGNORECASE,
         )
         for sq in sub_queries:
-            idxs = _bm25_top(bm25, pages, sq, per_q)
+            idxs = _hybrid_top(bm25, pages, embeddings, sq, per_q)
             early: list[int] = []
             if idxs:
                 top_doc_id = pages[idxs[0]]["doc_id"]
@@ -261,14 +313,15 @@ def retrieve_pages(
                         result[i] = pages[i]
                         top_indices.append(i)
 
-    # Full-question BM25 (fills remaining slots, may find cross-entity pages)
+    # Full-question hybrid retrieval (fills remaining slots, may find cross-entity pages)
     anchors = _TYPE_ANCHORS.get(answer_type, "")
     augmented_question = f"{question} {anchors}".strip() if anchors else question
-    tokens = expand_query(tokenize(augmented_question))
-    scores = bm25.get_scores(tokens)
-    ranked = sorted(range(len(scores)), key=lambda i: -scores[i])
-    main_indices = [i for i in ranked[:top_k] if scores[i] > 0]
+    main_indices = _hybrid_top(bm25, pages, embeddings, augmented_question, top_k)
     if not main_indices:
+        # Fallback: raw BM25 top-5
+        tokens = expand_query(tokenize(augmented_question))
+        scores = bm25.get_scores(tokens)
+        ranked = sorted(range(len(scores)), key=lambda i: -scores[i])
         main_indices = ranked[: min(5, len(ranked))]
     for i in main_indices:
         if i not in result:

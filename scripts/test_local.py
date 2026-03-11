@@ -252,7 +252,7 @@ def main(use_llm: bool = True, use_rerank: bool = True, verbose: bool = False):
     index_cache = os.path.join(CACHE_DIR, "index.pkl")
 
     pages = ingest_corpus(DOCS_DIR, pages_cache, min_chars=10)
-    bm25, pages = get_or_build_index(pages, index_cache)
+    bm25, pages, embeddings = get_or_build_index(pages, index_cache)
 
     recall_bm25 = 0
     recall_rerank = 0
@@ -265,7 +265,7 @@ def main(use_llm: bool = True, use_rerank: bool = True, verbose: bool = False):
 
     for tc in TEST_CASES:
         t0 = time.perf_counter()
-        retrieved = retrieve_pages(bm25, pages, tc["question"], top_k=20, add_neighbors=True)
+        retrieved = retrieve_pages(bm25, pages, tc["question"], top_k=20, add_neighbors=True, embeddings=embeddings)
 
         gold_in_bm25 = any(
             p["doc_id"] == PDF_NAME and p["page_number"] == tc["expected_page"]
