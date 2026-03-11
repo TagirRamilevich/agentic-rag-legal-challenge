@@ -7,8 +7,12 @@ from src.utils.number_parse import parse_number
 
 FREE_TEXT_FALLBACK = "There is no information on this question in the provided documents."
 FREE_TEXT_MAX = 280
-CONTEXT_CHARS_PER_PAGE = 1500
+CONTEXT_CHARS_PER_PAGE = 1200
 MAX_CONTEXT_PAGES = 3
+# Extractive types use less context for faster TTFT
+_EXTRACTIVE_TYPES = {"number", "bool", "boolean", "date", "name", "names"}
+CONTEXT_CHARS_EXTRACTIVE = 800
+MAX_CONTEXT_PAGES_EXTRACTIVE = 2
 
 
 def _provider() -> Optional[str]:
@@ -67,34 +71,48 @@ def _call(prompt: str, max_tokens: int = 256) -> Optional[str]:
 _TYPE_INSTRUCTIONS = {
     "number": (
         "Return ONLY a single numeric value (integer or decimal). "
-        "No units, no currency symbols, no text whatsoever. "
-        "If the answer is not present in the context, return exactly: null"
+        "No units, no currency symbols, no extra text. "
+        "Examples: 1500000 or 3.5 or 42. "
+        "If not found in context: null"
     ),
     "bool": (
         "Return ONLY true or false (lowercase). "
-        "If the answer is not present in the context, return exactly: null"
+        "true = yes, granted, approved, allowed, upheld, confirmed, correct, permitted. "
+        "false = no, dismissed, denied, rejected, refused, prohibited, incorrect. "
+        "Read the context carefully for the court ruling or factual statement. "
+        "If genuinely absent from context: null"
     ),
     "boolean": (
         "Return ONLY true or false (lowercase). "
-        "If the answer is not present in the context, return exactly: null"
+        "true = yes, granted, approved, allowed, upheld, confirmed, correct, permitted. "
+        "false = no, dismissed, denied, rejected, refused, prohibited, incorrect. "
+        "Read the context carefully for the court ruling or factual statement. "
+        "If genuinely absent from context: null"
     ),
     "date": (
         "Return ONLY a date in YYYY-MM-DD format. "
-        "If the answer is not present in the context, return exactly: null"
+        "Convert any date format (e.g. '15 March 2024' → '2024-03-15'). "
+        "If not found in context: null"
     ),
     "name": (
-        "Return ONLY the name or entity as a short phrase (no explanation, no punctuation around it). "
-        "If the answer is not present in the context, return exactly: null"
+        "Return ONLY the name or entity as a short phrase. "
+        "Include the full legal name if available (e.g. 'Acme Corp Ltd'). "
+        "No explanation, no extra text. "
+        "If not found in context: null"
     ),
     "names": (
-        'Return ONLY a JSON array of strings, e.g. ["Alice Corp", "Beta Ltd"]. '
-        "If the answer is not present in the context, return exactly: null"
+        "Return ONLY a JSON array of strings with ALL matching names/entities. "
+        'Example: ["John Smith", "Acme Corp Ltd", "Beta LLC"]. '
+        "Do NOT wrap in markdown code blocks. "
+        "Include all parties, people or entities that answer the question. "
+        "Be inclusive — if someone is mentioned in the relevant role, include them. "
+        "If not found in context: null"
     ),
     "free_text": (
         f"Answer in 1–3 sentences, maximum {FREE_TEXT_MAX} characters total. "
-        "Base your answer ONLY on the information in the provided context. "
-        "Do not hallucinate. "
-        f"If the answer is not in the context, return exactly: {FREE_TEXT_FALLBACK}"
+        "Base your answer ONLY on information in the provided context. "
+        "Be specific and cite relevant details. Do not hallucinate. "
+        f"If the answer is not in the context: {FREE_TEXT_FALLBACK}"
     ),
 }
 
@@ -117,9 +135,25 @@ def _parse(raw: str, answer_type: str) -> Any:
         return None
 
     if answer_type in ("bool", "boolean"):
-        if raw.lower() in ("true", "yes"):
+        low = raw.lower()
+        if low in ("true", "yes", "1"):
             return True
-        if raw.lower() in ("false", "no"):
+        if low in ("false", "no", "0"):
+            return False
+        # LLM sometimes returns a sentence instead of bare true/false
+        _TRUE_SIGNALS = re.compile(
+            r"\b(granted|approved|allowed|upheld|confirmed|correct|yes|true|permitted|succeeded|successful)\b",
+            re.IGNORECASE,
+        )
+        _FALSE_SIGNALS = re.compile(
+            r"\b(dismissed|denied|rejected|refused|prohibited|incorrect|false|no\b|not granted|not approved|failed|unsuccessful)\b",
+            re.IGNORECASE,
+        )
+        t = len(_TRUE_SIGNALS.findall(raw))
+        f = len(_FALSE_SIGNALS.findall(raw))
+        if t > f:
+            return True
+        if f > t:
             return False
         return None
 
@@ -185,13 +219,17 @@ def answer_with_llm(
         from src.pipeline.answer import answer_question
         return answer_question(question_data, pages)
 
+    is_extractive = answer_type in _EXTRACTIVE_TYPES
+    max_pages = MAX_CONTEXT_PAGES_EXTRACTIVE if is_extractive else MAX_CONTEXT_PAGES
+    chars_per_page = CONTEXT_CHARS_EXTRACTIVE if is_extractive else CONTEXT_CHARS_PER_PAGE
+
     context_parts: list[str] = []
     context_pages: list[dict] = []
-    for page in pages[:MAX_CONTEXT_PAGES]:
+    for page in pages[:max_pages]:
         text = page["text"].strip()
         if not text:
             continue
-        context_parts.append(f"[{page['doc_id']} p.{page['page_number']}]\n{text[:CONTEXT_CHARS_PER_PAGE]}")
+        context_parts.append(f"[{page['doc_id']} p.{page['page_number']}]\n{text[:chars_per_page]}")
         context_pages.append(page)
 
     if not context_parts:
