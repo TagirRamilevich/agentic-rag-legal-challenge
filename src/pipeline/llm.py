@@ -17,8 +17,8 @@ FREE_TEXT_MAX = 280
 _TYPE_CONFIG = {
     "bool":     {"max_pages": 5, "chars": 2000, "max_tokens": 30},
     "boolean":  {"max_pages": 5, "chars": 2000, "max_tokens": 30},
-    "number":   {"max_pages": 4, "chars": 1200, "max_tokens": 30},
-    "date":     {"max_pages": 4, "chars": 1200, "max_tokens": 30},
+    "number":   {"max_pages": 3, "chars": 1000, "max_tokens": 30},
+    "date":     {"max_pages": 3, "chars": 1000, "max_tokens": 30},
     "name":     {"max_pages": 4, "chars": 1500, "max_tokens": 60},
     "names":    {"max_pages": 4, "chars": 1800, "max_tokens": 160},
     "free_text":{"max_pages": 4, "chars": 2000, "max_tokens": 350},
@@ -517,12 +517,8 @@ def answer_with_llm(
         text = page["text"].strip()
         if not text:
             continue
-        # Distill to most relevant paragraphs for all types.
-        # For boolean comparisons: use sequential truncation to preserve context ordering.
-        if answer_type in ("bool", "boolean"):
-            distilled = text[:chars_per_page]
-        else:
-            distilled = _distill_page(text, question, chars_per_page)
+        # Distill to most relevant paragraphs for all types
+        distilled = _distill_page(text, question, chars_per_page)
         context_parts.append(
             f"[BLOCK {i}: {page['doc_id']} p.{page['page_number']}]\n{distilled}"
         )
