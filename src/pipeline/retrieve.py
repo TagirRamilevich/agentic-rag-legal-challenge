@@ -133,6 +133,26 @@ _TYPE_ANCHORS: dict[str, str] = {
 }
 
 
+_LAW_NO_EXACT_RE = re.compile(r"\bLaw No\.\s*\d+\s+of\s+\d{4}\b", re.IGNORECASE)
+
+
+def _find_enactment_notice_doc(
+    sub_q: str,
+    pages: list[dict],
+    doc_page_counts: dict,
+    doc_page_index: dict,
+) -> str:
+    """For a 'Law No. X of YYYY' sub-query, return the enactment notice doc_id (1-page doc).
+    Returns empty string if not found."""
+    sq_lower = sub_q.lower()
+    for p in pages:
+        if p["page_number"] == 1 and doc_page_counts.get(p["doc_id"], 99) <= 2:
+            t_lower = p["text"].lower()
+            if "enactment notice" in t_lower and sq_lower in t_lower:
+                return p["doc_id"]
+    return ""
+
+
 def retrieve_pages(
     bm25,
     pages: list[dict],
@@ -151,6 +171,9 @@ def retrieve_pages(
     top_indices: list[int] = []
     doc_page_index = {(p["doc_id"], p["page_number"]): j for j, p in enumerate(pages)}
 
+    from collections import Counter as _CounterDP
+    _doc_page_counts = _CounterDP(p["doc_id"] for p in pages)
+
     if sub_queries:
         # For comparison questions: INTERLEAVE pages from each entity so that
         # each entity is represented early (critical when max_pages is small)
@@ -162,6 +185,19 @@ def retrieve_pages(
             early: list[int] = []
             if idxs:
                 top_doc_id = pages[idxs[0]]["doc_id"]
+                # For "Law No. X of YYYY" date/commencement questions, prefer the
+                # enactment notice (1-page doc) over larger docs that merely reference it.
+                # Only do this for date-type questions; for admin questions we need main law pages.
+                _date_q = re.search(
+                    r"\b(come into force|commencement|enacted|same date|same year|enact)\b",
+                    question, re.IGNORECASE,
+                )
+                if _LAW_NO_EXACT_RE.search(sq) and _date_q:
+                    notice_doc = _find_enactment_notice_doc(
+                        sq, pages, _doc_page_counts, doc_page_index
+                    )
+                    if notice_doc:
+                        top_doc_id = notice_doc
                 for early_pg in (1, 2, 3, 4):
                     j = doc_page_index.get((top_doc_id, early_pg))
                     if j is not None:
@@ -246,9 +282,6 @@ def retrieve_pages(
                 best_law_name = named_law_m.group(0)
         if best_law_name:
             law_name = best_law_name.lower()
-            # Count pages per doc to prefer substantive docs over short notices
-            from collections import Counter as _Counter
-            doc_page_counts = _Counter(p["doc_id"] for p in pages)
             best_doc: str = ""
             best_match_len: int = 0
             best_page_count: int = 0
@@ -257,7 +290,7 @@ def retrieve_pages(
                     text_lower = p["text"].lower()
                     # Score: length of matching prefix in title line
                     if law_name in text_lower:
-                        cnt = doc_page_counts[p["doc_id"]]
+                        cnt = _doc_page_counts[p["doc_id"]]
                         # Prefer exact match in title (first 100 chars) over body mentions
                         in_title = law_name in text_lower[:100]
                         score = (int(in_title) * 1000) + cnt
@@ -293,6 +326,50 @@ def retrieve_pages(
                 if len(priority) >= 5:
                     break
 
+    # "Administered by" questions: pin pages whose text explicitly states
+    # which entity administers the law (these are often on page 4-5, not p.1).
+    # Run BEFORE law-identity so admin pages take priority over title pages
+    # (with max_per_doc=2, earlier priority pages fill slots first).
+    # Also search the full corpus in case BM25 found enactment notices instead
+    # of the main law documents for sub-queries.
+    if re.search(r"\badministered by\b", question, re.IGNORECASE):
+        _admin_pat = re.compile(r"\badministered by\b|\badministration of this law\b", re.IGNORECASE)
+        # First: tag already-retrieved pages
+        for idx in list(result.keys()):
+            if _admin_pat.search(result[idx]["text"]):
+                if not result[idx].get("_priority"):
+                    tagged = dict(result[idx])
+                    tagged["_priority"] = True
+                    result[idx] = tagged
+                    priority.append(idx)
+        # Second: for each sub_q law, find the main law doc and search for admin pages.
+        # (BM25 may have found the enactment notice instead of the main law doc.)
+        for sq in (sub_queries if sub_queries else [question]):
+            sq_lower = sq.lower()
+            # Find the largest doc whose p.1 contains the law reference
+            best_law_doc = ""
+            best_cnt = 0
+            for p in pages:
+                if p["page_number"] == 1:
+                    t_low = p["text"].lower()
+                    if sq_lower in t_low or any(w in t_low for w in sq_lower.split() if len(w) > 3):
+                        cnt = _doc_page_counts.get(p["doc_id"], 0)
+                        if cnt > best_cnt and cnt > 2:  # prefer substantive docs
+                            terms = [w for w in sq_lower.split() if len(w) > 3]
+                            if sum(1 for t in terms if t in t_low) >= len(terms) * 0.6:
+                                best_cnt = cnt
+                                best_law_doc = p["doc_id"]
+            if best_law_doc:
+                for idx2, p2 in enumerate(pages):
+                    if p2["doc_id"] == best_law_doc and _admin_pat.search(p2["text"]):
+                        if idx2 not in result or not result[idx2].get("_priority"):
+                            tagged2 = dict(p2)
+                            tagged2["_priority"] = True
+                            priority.append(idx2)
+                            result[idx2] = tagged2
+                            if idx2 not in top_indices:
+                                top_indices.append(idx2)
+
     # Law-identity questions: include p.1-3 of the top matching document.
     # Skip when article search already found specific pages (article is more precise).
     # (title pages always have the law number and enactment date)
@@ -308,8 +385,6 @@ def retrieve_pages(
         if law_phrases_q:
             # Use the longest law phrase (most specific)
             best_law_q = max(law_phrases_q, key=len)
-            from collections import Counter as _Counter2
-            doc_page_counts2 = _Counter2(p["doc_id"] for p in pages)
             best_doc2: str = ""
             best_score2: int = 0
             for p in pages:
@@ -321,7 +396,7 @@ def retrieve_pages(
                         cutoff = min(text_lower.find("as amended"), text_lower.find("consolidated"))
                         cutoff = max(cutoff, 0) if cutoff >= 0 else 300
                         in_title = best_law_q in text_lower[:cutoff] if cutoff > 10 else best_law_q in text_lower[:100]
-                        cnt = doc_page_counts2[p["doc_id"]]
+                        cnt = _doc_page_counts[p["doc_id"]]
                         score = (int(in_title) * 10000) + cnt
                         if score > best_score2:
                             best_score2 = score
@@ -337,6 +412,35 @@ def retrieve_pages(
                 result[j] = tagged
                 if j not in top_indices:
                     top_indices.append(j)
+
+    # "Enactment notice" questions: ensure at least one actual enactment-notice
+    # page (1-2 page doc) is in the result so the LLM can reason about commencement text.
+    if re.search(r"\benactment notice\b", question, re.IGNORECASE):
+        _en_pat = re.compile(r"ENACTMENT NOTICE", re.IGNORECASE)
+        found_en = False
+        # Tag already-retrieved 1-page enactment notice docs as priority
+        for idx in list(result.keys()):
+            if _doc_page_counts.get(result[idx]["doc_id"], 99) <= 2 and _en_pat.search(result[idx]["text"]):
+                if not result[idx].get("_priority"):
+                    tagged = dict(result[idx])
+                    tagged["_priority"] = True
+                    result[idx] = tagged
+                    priority.append(idx)
+                found_en = True
+        # If no enactment notice in result, add the first one found in corpus
+        if not found_en:
+            for p in pages:
+                if p["page_number"] == 1 and _doc_page_counts.get(p["doc_id"], 99) <= 2:
+                    if _en_pat.search(p["text"]):
+                        j = doc_page_index.get((p["doc_id"], 1))
+                        if j is not None:
+                            tagged = dict(pages[j])
+                            tagged["_priority"] = True
+                            priority.append(j)
+                            result[j] = tagged
+                            if j not in top_indices:
+                                top_indices.append(j)
+                            break
 
     # Keyword-within-document search: find pages in top doc that contain
     # content words from the question (for cases where TOC pages dominate BM25).
