@@ -45,6 +45,18 @@ _FALSE_RE = re.compile(
 )
 
 
+_ANTHROPIC_CLIENT = None
+
+
+def _get_anthropic_client():
+    """Reuse Anthropic client to avoid connection setup overhead per call."""
+    global _ANTHROPIC_CLIENT
+    if _ANTHROPIC_CLIENT is None:
+        import anthropic
+        _ANTHROPIC_CLIENT = anthropic.Anthropic()
+    return _ANTHROPIC_CLIENT
+
+
 def _provider() -> Optional[str]:
     if os.getenv("ANTHROPIC_API_KEY"):
         return "anthropic"
@@ -73,7 +85,7 @@ def _call(
         if p == "anthropic":
             import anthropic
             model = "claude-sonnet-4-6" if use_strong_model else "claude-haiku-4-5-20251001"
-            client = anthropic.Anthropic()
+            client = _get_anthropic_client()
             ttft_ms: Optional[int] = None
             chunks: list[str] = []
             input_tokens = 0
