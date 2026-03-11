@@ -12,8 +12,8 @@ FREE_TEXT_MAX = 280
 _TYPE_CONFIG = {
     "bool":     {"max_pages": 5, "chars": 800, "max_tokens": 20},
     "boolean":  {"max_pages": 5, "chars": 800, "max_tokens": 20},
-    "number":   {"max_pages": 2, "chars": 800,  "max_tokens": 20},
-    "date":     {"max_pages": 2, "chars": 800,  "max_tokens": 20},
+    "number":   {"max_pages": 3, "chars": 1500, "max_tokens": 20},
+    "date":     {"max_pages": 3, "chars": 1200, "max_tokens": 20},
     "name":     {"max_pages": 2, "chars": 900,  "max_tokens": 50},
     "names":    {"max_pages": 3, "chars": 900,  "max_tokens": 150},
     "free_text":{"max_pages": 3, "chars": 1500, "max_tokens": 280},
