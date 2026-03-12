@@ -1002,10 +1002,11 @@ def answer_with_llm(
                 _best_per_doc[did] = p
         source_pages = list(_best_per_doc.values())
 
-    # Article-reference filter for boolean: if question mentions "Article N",
+    # Article-reference filter: if question mentions "Article N",
     # prefer pages that actually contain that article reference.
-    # This improves precision by removing irrelevant expanded pages.
-    if answer_type in ("bool", "boolean") and not is_comparison and len(source_pages) > 1:
+    # This improves precision by removing ±1 expanded pages that don't have the article.
+    # Applied to all extractive types (bool, number, date, name) for non-comparison questions.
+    if not is_comparison and len(source_pages) > 1 and answer_type in ("bool", "boolean", "number", "date", "name"):
         _q_art_m = re.search(r"\bArticle\s+(\d+)", question, re.IGNORECASE)
         if _q_art_m:
             _art_n = _q_art_m.group(1)
