@@ -233,6 +233,9 @@ def _distill_page(text: str, question: str, max_chars: int) -> str:
 
     # Score paragraphs by keyword overlap with question
     q_words = set(w.lower() for w in re.sub(r"[^\w\s]", " ", question).split() if len(w) > 2)
+    # Check for specific article reference to boost matching paragraphs
+    _art_m = re.search(r"Article\s+(\d+)", question, re.IGNORECASE)
+    art_num = _art_m.group(1) if _art_m else None
     scored = []
     for para in paragraphs:
         para = para.strip()
@@ -240,6 +243,9 @@ def _distill_page(text: str, question: str, max_chars: int) -> str:
             continue
         p_lower = para.lower()
         score = sum(1 for w in q_words if w in p_lower)
+        # Bonus for paragraphs containing the specific article number
+        if art_num and re.search(rf"\b{art_num}\b", para):
+            score += 3
         scored.append((score, para))
 
     # Sort by relevance, take top paragraphs fitting max_chars
