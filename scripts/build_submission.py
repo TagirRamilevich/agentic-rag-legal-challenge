@@ -116,25 +116,19 @@ def main(phase: str, config_path: str = "configs/rag.yaml", skip_validate: bool 
         retrieved = retrieve_pages(bm25, units, q["question"], top_k=top_k_bm25, add_neighbors=add_neighbors, answer_type=q.get("answer_type", ""), embeddings=embeddings)
 
         is_cmp = is_comparison_question(q["question"])
-        # Only rerank comparison questions (need cross-encoder for multi-doc diversity)
-        need_rerank = use_reranker and is_cmp
-        if need_rerank:
-            final_pages = rerank_pages(retrieved, q["question"], top_k=top_k_rerank, model_name=reranker_model, max_per_doc=2 if is_cmp else 0)
+        if use_reranker and is_cmp:
+            # Comparison: rerank with diversity (max 2 pages per doc)
+            final_pages = rerank_pages(retrieved, q["question"], top_k=top_k_rerank, model_name=reranker_model, max_per_doc=2)
         elif is_cmp:
-            # For comparison questions without reranker: apply diversity to ensure
-            # pages from multiple docs are included (max 3 per doc)
+            # Comparison without reranker: apply diversity only
             final_pages = rerank_pages(retrieved, q["question"], top_k=top_k_rerank, max_per_doc=3)
+        elif use_reranker:
+            # Non-comparison: rerank ALL pages (reorder, don't truncate).
+            # LLM sees top max_pages from reranked list → better context.
+            # Evidence verification still has full pool → no recall loss.
+            final_pages = rerank_pages(retrieved, q["question"], top_k=len(retrieved), model_name=reranker_model)
         else:
-            # For free_text: pass more pages so answer_with_llm can do smart selection
-            _at = q.get("answer_type", "")
-            import re as _re
-            _at = q.get("answer_type", "")
-            _needs_deep = _at == "free_text" and _re.search(
-                r"\b(schedule|maximum fine|conclusion section|Conclusion.*costs)\b",
-                q["question"], _re.IGNORECASE,
-            )
-            # Pass all retrieved pages — answer_with_llm uses max_pages for LLM context
-            # but searches the full pool for citation verification and expansion.
+            # No reranker: pass all retrieved pages as-is
             final_pages = retrieved
 
         if use_llm:
