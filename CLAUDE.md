@@ -84,4 +84,4 @@ Maximize total score by prioritizing:
 - reference/discord_qa.md contains organizer Q&A. Use it to interpret rules and edge cases.
 - Do not include reference/ in code_archive.zip.
 - Do not include claude/ in code_archive.zip
-
+– Commit to github repository significant changes you make

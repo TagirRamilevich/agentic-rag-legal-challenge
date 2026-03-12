@@ -1,6 +1,7 @@
 import argparse
 import json
 import os
+import re
 import sys
 import time
 
@@ -17,7 +18,7 @@ from src.pipeline.index import get_or_build_index
 from src.utils.chunker import chunk_pages
 from src.pipeline.retrieve import retrieve_pages, is_comparison_question
 from src.pipeline.rerank import rerank_pages
-from src.pipeline.llm import answer_with_llm
+from src.pipeline.llm import answer_with_llm, warmup_llm
 from src.pipeline.answer import answer_question
 from src.pipeline.telemetry import build_telemetry
 from src.utils.json_schema import validate_submission
@@ -105,9 +106,11 @@ def main(phase: str, config_path: str = "configs/rag.yaml", skip_validate: bool 
     null_count = 0
     llm_count = 0
 
-    # Pre-warm reranker so first question TTFT isn't distorted by model load
+    # Pre-warm reranker and LLM client so first question TTFT isn't distorted
     if use_reranker:
         rerank_pages([{"text": "warmup", "doc_id": "x", "page_number": 1}], "warmup", top_k=1, model_name=reranker_model)
+    if use_llm:
+        warmup_llm()
 
     print("[4/4] Answering questions ...")
     for i, q in enumerate(questions, 1):
@@ -130,6 +133,35 @@ def main(phase: str, config_path: str = "configs/rag.yaml", skip_validate: bool 
         else:
             # No reranker: pass all retrieved pages as-is
             final_pages = retrieved
+
+        # Comparison guarantee: ensure pages from BOTH mentioned cases are in final_pages.
+        # Reranking may drop one case entirely if its pages rank low.
+        # Uses doc routing index to find the correct document for each case.
+        if is_cmp:
+            from src.pipeline.retrieve import build_doc_routing_index
+            _doc_route = build_doc_routing_index(pages)
+            _case_refs = re.findall(r"[A-Z]{2,5}\s+\d{3}/\d{4}", q["question"])
+            if len(_case_refs) >= 2:
+                for cr in _case_refs:
+                    cr_norm = cr.upper().replace("  ", " ")
+                    # Use routing index to find the correct doc_id for this case
+                    _target_doc = _doc_route["case"].get(cr_norm)
+                    if not _target_doc:
+                        continue
+                    # Check if final_pages has any page from this doc
+                    if any(p["doc_id"] == _target_doc for p in final_pages):
+                        continue
+                    # Add page 1 from the correct document
+                    for cp in pages:
+                        if cp["doc_id"] == _target_doc and cp["page_number"] == 1:
+                            final_pages.insert(0, cp)
+                            break
+                    else:
+                        # Fallback: first page from this doc in corpus
+                        for cp in pages:
+                            if cp["doc_id"] == _target_doc:
+                                final_pages.insert(0, cp)
+                                break
 
         if use_llm:
             # Set t0 right before LLM call (exclude retrieval/rerank from TTFT)

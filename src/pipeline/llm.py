@@ -58,6 +58,19 @@ def _get_anthropic_client():
     return _ANTHROPIC_CLIENT
 
 
+def warmup_llm():
+    """Make a minimal API call to warm up TLS connection and client caching."""
+    if _provider() == "anthropic":
+        try:
+            client = _get_anthropic_client()
+            client.messages.create(
+                model="claude-haiku-4-5-20251001", max_tokens=1,
+                messages=[{"role": "user", "content": "hi"}],
+            )
+        except Exception:
+            pass
+
+
 def _provider() -> Optional[str]:
     if os.getenv("ANTHROPIC_API_KEY") and "anthropic" not in _PROVIDER_DISABLED:
         return "anthropic"
@@ -238,10 +251,10 @@ _TYPE_INSTRUCTIONS = {
     ),
     "free_text": (
         f"Answer in 1-2 sentences (under 200 characters, hard max {FREE_TEXT_MAX}) using ONLY facts from the context. "
-        "Be direct and specific. Start with the answer itself — no lead-in phrases. "
+        "Your very first words MUST directly answer the question — never start with 'Article X says...' or 'According to...'. "
         "Every claim must come from the context — no inference or general knowledge. "
         "Include key specifics: article numbers, names, dates, amounts, legal terms. "
-        "If the question has multiple parts, address ALL parts. "
+        "If the question has multiple parts, address ALL parts in your answer. "
         "State facts confidently — no hedging ('appears to', 'seems to', 'it is possible'). "
         "Do NOT use markdown, do NOT reference block numbers or 'the context'. "
         "DIFC courts do NOT have juries, plea bargains, criminal proceedings, Miranda rights, parole, or verdicts. "
@@ -1073,24 +1086,58 @@ def answer_with_llm(
     else:
         source_pages = _find_source_pages(answer, context_pages, answer_type)
 
-    # Article-page verification: if question references "Article N" and the cited
-    # page(s) don't contain that article, replace with a page that does.
-    # This catches LLM citation errors (citing a nearby page instead of the article page).
-    # Search _all_pages (full retrieved list), not just context_pages, for better recall.
+    # Article-page verification: for article-related questions, find the page
+    # that contains the actual article CONTENT (not just a reference to it).
+    # A page mentioning "Article 7" in passing (e.g., "per Article 7") is less
+    # useful than the page where Article 7's text actually is.
+    _verified_subclause_page = None  # Track sub-clause verified page for downstream preservation
     if not is_comparison and source_pages and answer_type in ("bool", "boolean", "number", "date", "name"):
         _q_art_verify = re.search(r"\bArticle\s+(\d+)", question, re.IGNORECASE)
         if _q_art_verify:
             _art_v_num = _q_art_verify.group(1)
             _art_v_pat = re.compile(rf"\bArticle\s+{_art_v_num}\b|(?:^|\n)\s*{_art_v_num}\.\s", re.IGNORECASE)
-            _has_article = any(_art_v_pat.search(p.get("text", "")) for p in source_pages)
-            if not _has_article:
-                # Find a page with this article from the same doc(s) — search ALL retrieved pages
-                _cited_docs = {p["doc_id"] for p in source_pages}
-                _search_pool = _all_pages if _all_pages else context_pages
-                for cp in _search_pool:
-                    if cp["doc_id"] in _cited_docs and _art_v_pat.search(cp.get("text", "")):
-                        source_pages = [cp]
-                        break
+            # Extract sub-clause markers from question for fine-grained matching
+            _q_sub_m = re.search(
+                rf"\bArticle\s+{_art_v_num}(?:\(\d+\))?(\([a-z]\))",
+                question, re.IGNORECASE,
+            )
+            _q_sub = _q_sub_m.group(1) if _q_sub_m else None
+            _cited_docs = {p["doc_id"] for p in source_pages}
+            _search_pool = _all_pages if _all_pages else context_pages
+            # Score each candidate: sub-clause content > article heading > article ref
+            _best_page = None
+            _best_score = -1
+            for cp in _search_pool:
+                if cp["doc_id"] not in _cited_docs:
+                    continue
+                cp_text = cp.get("text", "")
+                has_art_ref = _art_v_pat.search(cp_text)
+                has_sub = _q_sub and _q_sub in cp_text
+                # Must have either article ref or sub-clause marker
+                if not has_art_ref and not has_sub:
+                    continue
+                sc = 0
+                if has_art_ref:
+                    sc += 1
+                # Sub-clause page is likely the actual article content page
+                # (continuation pages don't repeat "Article N" but have the sub-clauses)
+                if has_sub:
+                    sc += 5
+                if sc > _best_score:
+                    _best_score = sc
+                    _best_page = cp
+            if _best_page:
+                _best_key = (_best_page["doc_id"], _best_page["page_number"])
+                _current_keys = {(p["doc_id"], p["page_number"]) for p in source_pages}
+                if _best_key not in _current_keys:
+                    # Replace worst page with best article page
+                    if _best_score > 1:
+                        source_pages = [_best_page]
+                    else:
+                        source_pages.insert(0, _best_page)
+                # Track verified sub-clause page so downstream filters don't discard it
+                if _best_score > 1:
+                    _verified_subclause_page = _best_page
 
     # Post-citation verification for text-matchable types:
     # For non-comparison: PREFER evidence-verified pages from the primary doc.
@@ -1192,7 +1239,7 @@ def answer_with_llm(
     # Only add if current source_pages DON'T already contain the article
     # (avoids adding extra pages that hurt precision when article is already cited).
     _q_art_matches = re.findall(r"\bArticle\s+(\d+)", question, re.IGNORECASE)
-    if _q_art_matches and source_pages:
+    if _q_art_matches and source_pages and not _verified_subclause_page:
         for _art_num in _q_art_matches[:2]:  # limit to first 2 article refs
             _art_pat = re.compile(rf"\bArticle\s+{_art_num}\b", re.IGNORECASE)
             # Check if any current source page already contains this article
@@ -1310,6 +1357,11 @@ def answer_with_llm(
                         _keep.append(ap)
                         _keep_keys.add(ak)
                 source_pages = _keep if _keep else _art_pages
+                # Re-add verified sub-clause page if article filter discarded it
+                if _verified_subclause_page:
+                    _vk = (_verified_subclause_page["doc_id"], _verified_subclause_page["page_number"])
+                    if _vk not in {(p["doc_id"], p["page_number"]) for p in source_pages}:
+                        source_pages.insert(0, _verified_subclause_page)
 
     # Final page cap: tighter for non-comparison (single-doc questions) where
     # gold is typically 1-2 pages, looser for comparison (multi-doc).
