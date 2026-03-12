@@ -1086,9 +1086,15 @@ def answer_with_llm(
                     _q_art_ev = re.search(r"\bArticle\s+(\d+)", question, re.IGNORECASE)
                     if _q_art_ev and len(_filtered_ev) > 1:
                         _art_ev_n = _q_art_ev.group(1)
-                        _art_ev_pat = re.compile(rf"\bArticle\s+{_art_ev_n}\b|(?:^|\n)\s*{_art_ev_n}\.\s", re.IGNORECASE)
+                        _art_ev_pat = re.compile(rf"\bArticle\s+{_art_ev_n}\b|(?:^|\n)\s*{_art_ev_n}\.(?:\s|$)", re.IGNORECASE)
                         _art_ev = [p for p in _filtered_ev if _art_ev_pat.search(p.get("text", ""))]
                         if _art_ev:
+                            # Also keep adjacent pages — articles may span pages
+                            _art_keys = {(p["doc_id"], p["page_number"]) for p in _art_ev}
+                            _adj = {(d, n + delta) for d, n in _art_keys for delta in (-1, 1)}
+                            _art_ev = [p for p in _filtered_ev
+                                       if (p["doc_id"], p["page_number"]) in _art_keys
+                                       or (p["doc_id"], p["page_number"]) in _adj]
                             _filtered_ev = _art_ev
                     source_pages = _filtered_ev  # REPLACE (evidence is more precise)
             else:
@@ -1246,19 +1252,25 @@ def answer_with_llm(
 
     # Article-reference filter: if question mentions "Article N",
     # prefer pages that actually contain that article reference.
-    # This improves precision by removing ±1 expanded pages that don't have the article.
+    # Also keep adjacent pages (±1) from the same doc — articles span pages.
     # Applied to all extractive types (bool, number, date, name) for non-comparison questions.
     if not is_comparison and len(source_pages) > 1 and answer_type in ("bool", "boolean", "number", "date", "name"):
         _q_art_m = re.search(r"\bArticle\s+(\d+)", question, re.IGNORECASE)
         if _q_art_m:
             _art_n = _q_art_m.group(1)
             _art_filter_pat = re.compile(
-                rf"(?:\bArticle\s+{_art_n}\b|\b{_art_n}\s*\()", re.IGNORECASE
+                rf"(?:\bArticle\s+{_art_n}\b|\b{_art_n}\.(?:\s|$)|\b{_art_n}\s*\()", re.IGNORECASE
             )
             _art_pages = [p for p in source_pages if _art_filter_pat.search(p.get("text", ""))]
-            # Only apply filter if we found at least 1 page with the article
             if _art_pages:
-                source_pages = _art_pages
+                # Also keep pages adjacent to article pages (article may span pages)
+                _art_keys = {(p["doc_id"], p["page_number"]) for p in _art_pages}
+                _adjacent = {(p["doc_id"], p["page_number"] + d)
+                             for p in _art_pages for d in (-1, 1)}
+                _keep = [p for p in source_pages
+                         if (p["doc_id"], p["page_number"]) in _art_keys
+                         or (p["doc_id"], p["page_number"]) in _adjacent]
+                source_pages = _keep if _keep else _art_pages
 
     # Final page cap: tighter for non-comparison (single-doc questions) where
     # gold is typically 1-2 pages, looser for comparison (multi-doc).
