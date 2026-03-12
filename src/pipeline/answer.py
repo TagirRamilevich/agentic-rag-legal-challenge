@@ -102,14 +102,35 @@ def extract_number(
     pages: list[dict], question: str
 ) -> tuple[Optional[Any], list[dict]]:
     keywords = _keywords(question)
+    q_lower = question.lower()
     best_num, best_page, best_score = None, None, -1
 
+    # For "law number" questions, try specific pattern first
+    _is_law_num_q = bool(re.search(r"\b(law\s+number|official.*number|difc\s+law\s+no)\b", q_lower))
+
     for page in pages:
+        if _is_law_num_q:
+            # Try structured extraction: "Law No. X of YYYY" or "DIFC Law No. X"
+            m = re.search(r"(?:DIFC\s+)?Law\s+No\.?\s*(\d+)", page["text"], re.IGNORECASE)
+            if m:
+                val = int(m.group(1))
+                return val, [page]
+
         for sent in _sentences(page["text"]):
             score = _relevance(sent, keywords)
             if score > best_score:
-                val = parse_number(sent)
+                # Strip article/section sub-references before parsing
+                clean_sent = re.sub(
+                    r"\b(?:Article|Section|Clause|Schedule|Part)\s+\d+(?:\(\w+\))*",
+                    "", sent, flags=re.IGNORECASE,
+                )
+                val = parse_number(clean_sent)
+                if val is None:
+                    val = parse_number(sent)
                 if val is not None:
+                    # Legal Q&A about counts/durations: always positive
+                    if val < 0 and "-" not in sent:
+                        val = -val
                     best_score = score
                     best_num = val
                     best_page = page
@@ -148,9 +169,69 @@ def extract_date(
     return None, []
 
 
+def _extract_date_from_text(text: str) -> Optional[str]:
+    """Extract the first valid date from text, trying all patterns."""
+    for pattern, formatter in _DATE_PATTERNS:
+        m = re.search(pattern, text, re.IGNORECASE)
+        if m:
+            try:
+                date_str = formatter(m)
+                y, mo, d = (int(x) for x in date_str.split("-"))
+                if 1900 <= y <= 2100 and 1 <= mo <= 12 and 1 <= d <= 31:
+                    return date_str
+            except Exception:
+                pass
+    return None
+
+
+def _extract_comparison_date_name(
+    pages: list[dict], question: str
+) -> tuple[Optional[str], list[dict]]:
+    """For 'which case has earlier date' questions: extract dates from docs, compare."""
+    # Extract case references from question
+    case_refs = re.findall(r"\b([A-Z]{2,5}\s+\d{3}/\d{4})\b", question)
+    if len(case_refs) < 2:
+        return None, []
+
+    # Find dates for each case reference from their documents
+    case_dates: dict[str, tuple[str, dict]] = {}  # case_ref -> (date_str, page)
+    for page in pages:
+        text = page["text"]
+        for ref in case_refs:
+            if ref in text or ref.replace(" ", "") in text.replace(" ", ""):
+                # Look for Date of Issue or any date near the case reference
+                doi_m = re.search(r"Date\s+of\s+Issue[:\s]*([^\n]+)", text, re.IGNORECASE)
+                if doi_m:
+                    d = _extract_date_from_text(doi_m.group(1))
+                    if d and ref not in case_dates:
+                        case_dates[ref] = (d, page)
+                elif ref not in case_dates:
+                    d = _extract_date_from_text(text[:500])
+                    if d:
+                        case_dates[ref] = (d, page)
+
+    if len(case_dates) >= 2:
+        q_lower = question.lower()
+        want_earlier = "earlier" in q_lower or "first" in q_lower
+        sorted_cases = sorted(case_dates.items(), key=lambda x: x[1][0])
+        chosen = sorted_cases[0] if want_earlier else sorted_cases[-1]
+        ref, (date_str, page) = chosen
+        return ref, [case_dates[r][1] for r in case_dates]
+
+    return None, []
+
+
 def extract_name(
     pages: list[dict], question: str
 ) -> tuple[Optional[str], list[dict]]:
+    q_lower = question.lower()
+
+    # For "which case has earlier/later date" comparison questions, use structured extraction
+    if re.search(r"\b(earlier|later|first|which case|which document)\b.*\b(date|issue)", q_lower):
+        result, used = _extract_comparison_date_name(pages, question)
+        if result is not None:
+            return result, used
+
     keywords = _keywords(question)
     best_name, best_page, best_score = None, None, -1
 

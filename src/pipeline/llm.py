@@ -15,13 +15,13 @@ FREE_TEXT_MAX = 280
 # With context distillation, chars_per_page is the distilled paragraph budget
 # Boolean: needs more pages for comparison across 2 docs
 _TYPE_CONFIG = {
-    "bool":     {"max_pages": 5, "chars": 1500, "max_tokens": 30},
-    "boolean":  {"max_pages": 5, "chars": 1500, "max_tokens": 30},
-    "number":   {"max_pages": 4, "chars": 1000, "max_tokens": 30},
-    "date":     {"max_pages": 4, "chars": 1000, "max_tokens": 30},
-    "name":     {"max_pages": 4, "chars": 1200, "max_tokens": 60},
-    "names":    {"max_pages": 4, "chars": 1500, "max_tokens": 160},
-    "free_text":{"max_pages": 5, "chars": 2000, "max_tokens": 250},
+    "bool":     {"max_pages": 4, "chars": 1200, "max_tokens": 30},
+    "boolean":  {"max_pages": 4, "chars": 1200, "max_tokens": 30},
+    "number":   {"max_pages": 3, "chars": 1000, "max_tokens": 30},
+    "date":     {"max_pages": 3, "chars": 1000, "max_tokens": 30},
+    "name":     {"max_pages": 4, "chars": 1000, "max_tokens": 60},
+    "names":    {"max_pages": 4, "chars": 1200, "max_tokens": 160},
+    "free_text":{"max_pages": 4, "chars": 1500, "max_tokens": 250},
 }
 _DEFAULT_CONFIG = {"max_pages": 3, "chars": 1200, "max_tokens": 256}
 
@@ -217,12 +217,11 @@ _TYPE_INSTRUCTIONS = {
         "If genuinely not found: null" + _CITE_SUFFIX
     ),
     "free_text": (
-        f"Answer in 1-2 concise sentences (UNDER 200 characters) using ONLY facts from the context. "
-        "IMPORTANT: Start directly with the factual answer. "
-        "NO preamble ('According to', 'The', 'Under', 'Based on'). "
-        "NO redundant quoting — state each fact once. "
-        "Include specific details: article numbers, names, dates, amounts. "
-        "Do NOT use markdown. Do NOT reference block numbers. "
+        f"Answer in 1-3 concise sentences (aim for 150-250 characters) using ONLY facts from the context. "
+        "Start directly with the factual answer — no preamble. "
+        "Include ALL key details: article numbers, names, dates, amounts, conditions. "
+        "If multiple aspects are asked, address each one. "
+        "Do NOT use markdown or reference block numbers. "
         "DIFC courts do NOT have juries, plea bargains, criminal proceedings, Miranda rights, parole, or verdicts. "
         "If the question asks about concepts that don't exist in DIFC courts, "
         f"write EXACTLY: {FREE_TEXT_FALLBACK}\n"
@@ -248,6 +247,9 @@ def _distill_page(text: str, question: str, max_chars: int) -> str:
     # Check for specific article reference to boost matching paragraphs
     _art_m = re.search(r"Article\s+(\d+)", question, re.IGNORECASE)
     art_num = _art_m.group(1) if _art_m else None
+    # Extract sub-clause reference like "(3)(j)" for fine-grained matching
+    _subclause_m = re.search(r"Article\s+\d+(?:\(\d+\))?(\([a-z]\))", question, re.IGNORECASE)
+    _subclause = _subclause_m.group(1) if _subclause_m else None
     # Detect case/party questions to preserve header sections
     _is_party_q = bool(re.search(r"\b(claimant|defendant|respondent|party|parties|judge|issued|date of issue)\b", question, re.IGNORECASE))
     _is_outcome_q = bool(re.search(r"\b(result|outcome|rul(?:e|ed|ing)|ordered|decision|decided|conclud(?:e|ed|ing)|conclusion)\b", question, re.IGNORECASE))
@@ -258,9 +260,17 @@ def _distill_page(text: str, question: str, max_chars: int) -> str:
             continue
         p_lower = para.lower()
         score = sum(1 for w in q_words if w in p_lower)
-        # Bonus for paragraphs containing the specific article number
-        if art_num and re.search(rf"\b{art_num}\b", para):
-            score += 3
+        # Bonus for paragraphs containing the specific article reference
+        if art_num:
+            # Strong match: "Article N" or "N." at start (article heading)
+            if re.search(rf"\bArticle\s+{art_num}\b|(?:^|\n)\s*{art_num}\.\s", para, re.IGNORECASE):
+                score += 5
+                # Extra bonus if sub-clause matches too
+                if _subclause and _subclause in para:
+                    score += 3
+            # Weak match: just the number (sub-clause reference)
+            elif re.search(rf"\b{art_num}\b", para):
+                score += 2
         # Bonus for case header sections (BETWEEN, parties, judge, date)
         if _is_party_q:
             if re.search(r"\bBETWEEN\b|Claimant|Defendant|Respondent|UPON|Date of Issue|BEFORE", para):
