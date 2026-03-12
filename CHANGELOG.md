@@ -126,7 +126,23 @@ Detailed log of all pipeline iterations with metrics, for post-competition publi
 13. **Date format fallback** — Parse "15 March 2024" and "March 15, 2024" if LLM doesn't return YYYY-MM-DD
 14. **Clean up redundant comparison check** in retrieve.py
 
-### Expected score: ~0.78-0.82 (up from 0.704)
+### Session 12 additions:
+15. **Fix negative number extraction** — `parse_number` treated `(6)` in "six (6) months" as accounting negative → always positive for legal counts/durations. Fixed 9 deterministic answers.
+16. **Strip Article/Section sub-references before number parsing** — Prevents extracting sub-article numbers like "(2)" from "Article 14(2)(b)".
+17. **Law number extraction pattern** — For "what is the law number" questions, extract "Law No. X" directly instead of picking up the year. Fixed 3 answers.
+18. **Structured comparison-date-name extraction** — For "which case has earlier date" questions, extract dates from both case docs and compare. Fixed 10 answers.
+19. **Context size reduction** — bool: 5→4 pages 1500→1200 chars (-34%), free_text: 5→4 pages 2000→1500 chars (-39%), number: 4→3 pages (-25%). Expected TTFT: 937→700-750ms.
+20. **Better distill_page article scoring** — "Article N" heading gets +5, just N gets +2. Sub-clause match bonus.
+21. **Adversarial detection for ALL answer types** — Not just free_text. Returns null + empty pages for deterministic types. Prevents G=0.0 when gold expects null.
+22. **LLM-null deterministic fallback** — When LLM returns null but context has extractable info, try deterministic extraction. Reduces false nulls.
+23. **Improved free_text prompt** — Allow 150-250 chars (was "UNDER 200"), address all aspects for better completeness score.
+
+### Deterministic answers fixed in session 12: 22 total
+- 9 negative numbers → positive (Q20, Q28, Q37, Q47, Q48, Q55, Q56, Q80, Q89)
+- 3 law numbers fixed (Q3: 2018→2, Q53: 2005→4, Q96: 2004→3)
+- 10 comparison-name questions fixed (Q9, Q11, Q16, Q42, Q49, Q65, Q68, Q73, Q93, Q94)
+
+### Expected score: ~0.78-0.85 (up from 0.704)
 
 ---
 
