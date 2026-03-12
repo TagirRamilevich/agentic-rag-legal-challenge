@@ -117,7 +117,16 @@ Detailed log of all pipeline iterations with metrics, for post-competition publi
 - TTFT: ~920ms
 - Estimated G improvement: 0.788 → ~0.82-0.85
 
-### Expected score: ~0.75-0.78 (up from 0.704)
+### Session 11 additions:
+8. **Skip boolean ±1 expansion when LLM citation available** — Trust CITE indices directly. For 1-page gold: G=1.0 vs G=0.879 with expansion (+0.121 per question)
+9. **Evidence-replace for extractive types** — For non-comparison number/date/name: REPLACE LLM citation with evidence-verified pages from primary doc (more precise than UNION)
+10. **Conservative article-aware inclusion** — Only add article pages when not already cited. Prevents adding redundant pages.
+11. **Tighter caps** — names 3→2, free_text 4→3 for non-comparison
+12. **Word-number fallback** — If LLM returns "six" instead of 6, convert via dictionary
+13. **Date format fallback** — Parse "15 March 2024" and "March 15, 2024" if LLM doesn't return YYYY-MM-DD
+14. **Clean up redundant comparison check** in retrieve.py
+
+### Expected score: ~0.78-0.82 (up from 0.704)
 
 ---
 
@@ -147,17 +156,18 @@ v9  █████████████████████████�
 | v7 | 0.929 | 0.593 | 0.659 | 0.991 | 1020 | 1.035 | 0.559 |
 | v8 | 0.929 | 0.713 | 0.788 | 0.996 | 937  | 1.038 | 0.704 |
 
-## Leaderboard (warmup, 2026-03-12 ~12:00)
+## Leaderboard (warmup, 2026-03-12 ~18:00)
 | Rank | Team | Total | Det | Asst | G | T | TTFT | F |
 |------|------|-------|-----|------|-------|-------|------|-------|
 | 1 | KenKo | 0.858 | 0.971 | 0.720 | 0.922 | 0.996 | 904 | 1.043 |
-| 2 | Dmitry Ulybin | 0.760 | 0.943 | 0.607 | 0.893 | 0.997 | 1945 | 1.013 |
-| 3 | StepSolutions | 0.735 | 0.929 | 0.773 | 0.840 | 0.999 | 2508 | 0.993 |
-| 4 | IAS Partners | 0.716 | 0.943 | 0.740 | 0.804 | 0.994 | 1714 | 1.016 |
-| **5** | **Tagir Analyzes** | **0.704** | **0.929** | **0.713** | **0.788** | **0.996** | **937** | **1.038** |
-| 6 | Tzur Labs | 0.696 | 0.943 | 0.707 | 0.766 | 0.996 | 375 | 1.046 |
-| 7 | MaxOps AI | 0.612 | 0.893 | 0.567 | 0.745 | 0.994 | 820 | 1.039 |
-| 8 | RAGdolls | 0.593 | 0.957 | 0.653 | 0.655 | 0.996 | 16 | 1.050 |
+| 2 | Kovalyoff | 0.824 | 0.971 | 0.687 | 0.890 | 0.996 | 84 | 1.050 |
+| 3 | Dmitry Ulybin | 0.760 | 0.943 | 0.607 | 0.893 | 0.997 | 1945 | 1.013 |
+| 4 | StepSolutions | 0.735 | 0.929 | 0.773 | 0.840 | 0.999 | 2508 | 0.993 |
+| 5 | IAS Partners | 0.716 | 0.943 | 0.740 | 0.804 | 0.994 | 1714 | 1.016 |
+| **6** | **Tagir Analyzes** | **0.704** | **0.929** | **0.713** | **0.788** | **0.996** | **937** | **1.038** |
+| 7 | Tzur Labs | 0.696 | 0.943 | 0.707 | 0.766 | 0.996 | 375 | 1.046 |
+| 8 | MaxOps AI | 0.612 | 0.893 | 0.567 | 0.745 | 0.994 | 820 | 1.039 |
+| 9 | RAGdolls | 0.593 | 0.957 | 0.653 | 0.655 | 0.996 | 16 | 1.050 |
 
 ### Gap analysis (us vs top-3):
 - **Det**: 0.929 vs KenKo 0.971 — gap 0.042 (need ~1-2 more correct deterministic answers)
