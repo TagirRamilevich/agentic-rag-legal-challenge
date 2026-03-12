@@ -623,6 +623,7 @@ def answer_with_llm(
     """
     answer_type = question_data.get("answer_type", "free_text")
     question = question_data.get("question", "")
+    _all_pages = pages  # Save original full page list before injection modifies it
 
     _t0 = t0 if t0 is not None else time.perf_counter()
 
@@ -861,6 +862,7 @@ def answer_with_llm(
     else:
         source_pages = _find_source_pages(answer, context_pages, answer_type)
 
+
     # Enhanced post-citation verification for text-matchable types:
     # Search ALL retrieved pages (not just context_pages) for answer evidence.
     # UNION with LLM-cited pages to maximize recall.
@@ -873,6 +875,55 @@ def answer_with_llm(
                 if key not in existing_keys:
                     source_pages.append(ep)
                     existing_keys.add(key)
+
+    # For non-comparison questions: restrict to the primary document(s).
+    # Evidence search may find answer text in unrelated docs (e.g., same date
+    # appears in multiple case docs). The LLM-cited doc is the correct one.
+    if not is_comparison and len(source_pages) > 1:
+        _target_doc_ids: set[str] = set()
+        # Strategy 1: Single case reference → restrict to that case's docs
+        _case_refs = re.findall(r"[A-Z]{2,5}\s+\d{3}/\d{4}", question)
+        if len(_case_refs) == 1:
+            _target_ref = _case_refs[0].replace(" ", "")
+            for cp in context_pages:
+                if _target_ref in cp.get("text", "").replace(" ", ""):
+                    _target_doc_ids.add(cp["doc_id"])
+        # Strategy 2: Specific law name → restrict to that law's doc
+        # Match law name in the document TITLE (first 300 chars of page 1)
+        if not _target_doc_ids:
+            _law_m = re.search(
+                r"\b(?:the\s+)?((?:Operating|Employment|Trust|Foundations?|"
+                r"General Partnership|Limited Liability Partnership|"
+                r"Common Reporting Standard|Insolvency|Companies|"
+                r"Application of Civil)\s+Law)\b",
+                question, re.IGNORECASE,
+            )
+            if _law_m:
+                _law_name = _law_m.group(1).lower()
+                for cp in _all_pages:
+                    if cp["page_number"] == 1:
+                        _title_text = cp.get("text", "")[:300].lower()
+                        if _law_name in _title_text:
+                            _target_doc_ids.add(cp["doc_id"])
+        # Strategy 3: "DIFC Law No. N" → match by law number on page 1
+        if not _target_doc_ids:
+            _law_no_m = re.search(
+                r"\bDIFC\s+Law\s+No\.?\s*(\d+)\b", question, re.IGNORECASE,
+            )
+            if _law_no_m:
+                _law_num = _law_no_m.group(1)
+                _law_no_pat = re.compile(
+                    rf"LAW\s+NO\.?\s*{_law_num}\b", re.IGNORECASE
+                )
+                for cp in _all_pages:
+                    if cp["page_number"] == 1:
+                        _title_text = cp.get("text", "")[:300]
+                        if _law_no_pat.search(_title_text):
+                            _target_doc_ids.add(cp["doc_id"])
+        if _target_doc_ids:
+            _filtered = [p for p in source_pages if p["doc_id"] in _target_doc_ids]
+            if _filtered:
+                source_pages = _filtered
 
     # Article-aware page inclusion: if question references a specific Article,
     # ensure pages containing that article from cited docs are included.

@@ -95,7 +95,7 @@ _ARTICLE_RE = re.compile(r"\b(?:Article|Section)\s+(\d+)(?:\s*[\.(]\d+[).]?)*\b"
 
 # Indicators that a question compares two different documents/entities
 _COMPARISON_RE = re.compile(
-    r"\b(same (year|date|entity|authority|minister|body|person|time|month|day|judge|law)|"
+    r"\b(same (year|date|entity|authority|minister|body|person|month|day|judge|law)|"
     r"(earlier|later|older|newer) (in (the )?year|than)|"
     r"both .{3,60} and|"
     r"administered by (the )?same|"
