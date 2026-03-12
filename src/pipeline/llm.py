@@ -1089,11 +1089,13 @@ def answer_with_llm(
     else:
         source_pages = _find_source_pages(answer, context_pages, answer_type)
 
-    # Recall floor for article questions: if CITE selected only 1 page, add
-    # the next same-doc context page. Articles often span 2+ pages, and
-    # with β=2.5, missing a gold page costs 6.25x more than an extra page.
+    # Recall floor: if CITE selected only 1 page, add the next same-doc
+    # context page. With β=2.5, missing a gold page costs 6.25x more than
+    # an extra page. Applied to article questions (articles span pages) and
+    # free_text (gold is typically multi-page for detailed answers).
     _has_article_ref = bool(re.search(r"\bArticle\s+\d+", question, re.IGNORECASE))
-    if len(source_pages) == 1 and len(context_pages) >= 2 and _has_article_ref:
+    _needs_recall_floor = _has_article_ref or answer_type == "free_text"
+    if len(source_pages) == 1 and len(context_pages) >= 2 and _needs_recall_floor:
         _sp_key = (source_pages[0]["doc_id"], source_pages[0]["page_number"])
         _sp_doc = source_pages[0]["doc_id"]
         for cp in context_pages:
