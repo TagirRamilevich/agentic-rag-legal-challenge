@@ -172,10 +172,61 @@ def extract_name(
     return None, []
 
 
+_PARTY_NOISE = frozenset({
+    "court", "appeal", "order", "orders", "upon", "and", "between", "claim",
+    "claimant", "defendant", "respondent", "appellant", "applicant",
+    "january", "february", "march", "april", "may", "june", "july",
+    "august", "september", "october", "november", "december",
+    "monday", "tuesday", "wednesday", "thursday", "friday",
+    "dubai", "difc", "courts", "justice", "judge", "honour",
+    "arbitration", "division", "instance", "section", "part",
+    "claim no", "case no", "renewed", "application", "disbursements",
+})
+
+
+def _extract_parties_from_between(text: str) -> list[str]:
+    """Extract party names from BETWEEN...and... sections in court documents."""
+    m = re.search(r"BETWEEN\s*\n(.+?)(?:\nORDER|\nUPON|\nBEFORE)", text, re.DOTALL | re.IGNORECASE)
+    if not m:
+        return []
+    between_text = m.group(1)
+    # Split on "and" separator
+    parts = re.split(r"\n\s*and\s*\n", between_text, flags=re.IGNORECASE)
+    parties = []
+    for part in parts:
+        # Get the first line (party name), skip role labels
+        lines = [l.strip() for l in part.strip().split("\n") if l.strip()]
+        for line in lines:
+            # Skip role labels
+            if re.match(r"^(Claimant|Defendant|Respondent|Appellant|Applicant)", line, re.IGNORECASE):
+                continue
+            # Skip numbered references like "(1)" at start
+            name = re.sub(r"^\(\d+\)\s*", "", line).strip()
+            if name and len(name) > 3 and name.lower() not in _PARTY_NOISE:
+                parties.append(name)
+    return parties
+
+
 def extract_names(
     pages: list[dict], question: str
 ) -> tuple[Optional[list], list[dict]]:
     keywords = _keywords(question)
+    q_lower = question.lower()
+
+    # For party-related questions, try structured extraction first
+    is_party_q = any(w in q_lower for w in ["claimant", "defendant", "respondent", "party", "parties"])
+    if is_party_q:
+        for page in pages:
+            parties = _extract_parties_from_between(page["text"])
+            if parties:
+                # Filter based on role mentioned in question
+                if "claimant" in q_lower:
+                    # First party in BETWEEN is typically the claimant
+                    return parties[:1] if len(parties) >= 2 else parties, [page]
+                if "defendant" in q_lower or "respondent" in q_lower:
+                    return parties[1:] if len(parties) >= 2 else parties, [page]
+                return parties, [page]
+
     collected: list[str] = []
     used_pages: list[dict] = []
 
@@ -187,7 +238,7 @@ def extract_names(
             if _relevance(sent, keywords) > 0:
                 candidates = [
                     n for n in _PROPER_NOUN_RE.findall(sent)
-                    if n.lower() not in _STOPWORDS and len(n) > 3
+                    if n.lower() not in _PARTY_NOISE and n.lower() not in _STOPWORDS and len(n) > 3
                 ]
                 page_names.extend(candidates)
 
@@ -201,7 +252,7 @@ def extract_names(
             if not keywords or any(kw in item.lower() for kw in keywords):
                 page_names.extend(
                     n for n in _PROPER_NOUN_RE.findall(item)
-                    if n.lower() not in _STOPWORDS and len(n) > 3
+                    if n.lower() not in _PARTY_NOISE and n.lower() not in _STOPWORDS and len(n) > 3
                 )
 
         if page_names:
