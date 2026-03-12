@@ -21,7 +21,7 @@ _TYPE_CONFIG = {
     "date":     {"max_pages": 3, "chars": 900, "max_tokens": 30},
     "name":     {"max_pages": 3, "chars": 900, "max_tokens": 60},
     "names":    {"max_pages": 3, "chars": 1000, "max_tokens": 160},
-    "free_text":{"max_pages": 4, "chars": 1200, "max_tokens": 250},
+    "free_text":{"max_pages": 5, "chars": 1200, "max_tokens": 250},
 }
 _DEFAULT_CONFIG = {"max_pages": 3, "chars": 1200, "max_tokens": 256}
 
@@ -92,12 +92,13 @@ def _call(
             input_tokens = 0
             output_tokens = 0
 
+            _timeout = 12.0 if use_strong_model else 6.0
             with client.messages.stream(
                 model=model,
                 max_tokens=max_tokens,
                 temperature=0,
                 messages=[{"role": "user", "content": prompt}],
-                timeout=6.0,
+                timeout=_timeout,
             ) as stream:
                 for chunk in stream.text_stream:
                     if ttft_ms is None:
@@ -236,15 +237,13 @@ _TYPE_INSTRUCTIONS = {
         "If genuinely not found: null" + _CITE_SUFFIX
     ),
     "free_text": (
-        f"Answer in 2-3 concise sentences (~250 characters, max {FREE_TEXT_MAX}) using ONLY facts from the context. "
-        "Begin with the direct answer to the question — no preamble, no restating the question. "
-        "Every sentence must correspond to specific text in the context — no general legal knowledge or reasoning. "
-        "State only what the document explicitly says; never infer beyond the literal text. "
-        "Include key details: article numbers, names, dates, amounts, conditions. "
-        "If the question has multiple parts, address each one. "
-        "If the context partially answers, state what IS found and note what is not addressed. "
-        "If the context clearly answers, state it confidently without hedging. "
-        "Do NOT use markdown or reference block numbers. "
+        f"Answer in 1-2 sentences (under 200 characters, hard max {FREE_TEXT_MAX}) using ONLY facts from the context. "
+        "Be direct and specific. Start with the answer itself — no lead-in phrases. "
+        "Every claim must come from the context — no inference or general knowledge. "
+        "Include key specifics: article numbers, names, dates, amounts, legal terms. "
+        "If the question has multiple parts, address ALL parts. "
+        "State facts confidently — no hedging ('appears to', 'seems to', 'it is possible'). "
+        "Do NOT use markdown, do NOT reference block numbers or 'the context'. "
         "DIFC courts do NOT have juries, plea bargains, criminal proceedings, Miranda rights, parole, or verdicts. "
         "If the question asks about concepts that don't exist in DIFC courts, "
         f"write EXACTLY: {FREE_TEXT_FALLBACK}\n"
@@ -350,6 +349,19 @@ def _distill_page(text: str, question: str, max_chars: int) -> str:
                         scored[j] = (max(s, 5), orig_i, p)
                         _art_para_indices.add(idx + 1)
                         break
+
+    # Sub-clause continuation: when a paragraph contains the target sub-clause
+    # (e.g., "(j)" for "Article 7(3)(j)"), boost the next 2 paragraphs as they
+    # are likely sub-items (e.g., "(i)" and "(ii)") of that clause.
+    # This prevents losing critical sub-sub-clauses during distillation.
+    if _subclause:
+        for j, (s, orig_i, p) in enumerate(scored):
+            if _subclause in p:
+                # Boost next 2 paragraphs (sub-items)
+                for k, (sk, ok, pk) in enumerate(scored):
+                    if ok in (orig_i + 1, orig_i + 2) and sk < 5:
+                        scored[k] = (max(sk, 5), ok, pk)
+                break
 
     # Sort by relevance, take top paragraphs fitting max_chars
     scored.sort(key=lambda x: -x[0])
@@ -534,20 +546,19 @@ def _parse(raw: str, answer_type: str) -> Any:
         if text.startswith(FREE_TEXT_FALLBACK[:30]):
             return FREE_TEXT_FALLBACK
         if len(text) > FREE_TEXT_MAX:
-            # Smart truncation: prefer sentence boundary, then word boundary
-            truncated = text[:FREE_TEXT_MAX]
-            # Try to end at last sentence-ending punctuation
-            last_period = max(
-                truncated.rfind(". "),
-                truncated.rfind(".)"),
-                truncated.rfind('."'),
-                # Also check period at very end of truncated string
-                len(truncated) - 1 if truncated.endswith(".") else -1,
-            )
-            if last_period > FREE_TEXT_MAX * 0.5:
-                text = truncated[:last_period + 1]
+            # Smart truncation: always cut at a complete sentence boundary.
+            # Find ALL sentence-ending positions within the limit.
+            _sent_ends: list[int] = []
+            for m in re.finditer(r'[.!?](?:\)|\")?\s', text[:FREE_TEXT_MAX]):
+                _sent_ends.append(m.end() - 1)  # position of last char of sentence
+            # Also check if text ends with period right at the limit
+            if text[FREE_TEXT_MAX - 1] in '.!?' or (FREE_TEXT_MAX >= 2 and text[FREE_TEXT_MAX - 2] in '.!?' and text[FREE_TEXT_MAX - 1] in ')"'):
+                _sent_ends.append(FREE_TEXT_MAX - 1)
+            if _sent_ends and _sent_ends[-1] > FREE_TEXT_MAX * 0.35:
+                text = text[:_sent_ends[-1] + 1].rstrip()
             else:
-                # Fall back to last space (avoid mid-word cut)
+                # No good sentence boundary — cut at last space + add period
+                truncated = text[:FREE_TEXT_MAX]
                 last_space = truncated.rfind(" ")
                 if last_space > FREE_TEXT_MAX * 0.5:
                     text = truncated[:last_space].rstrip(",;:—-") + "."
@@ -796,7 +807,9 @@ def answer_with_llm(
         r"\bArticle\s+(\d+)(?:\((\d+)\))?(?:\(([a-z])\))?",
         question, re.IGNORECASE,
     )
-    _inject_needed = _is_schedule_question or _is_conclusion_question or _art_subclause_m
+    # Also inject if question references any Article N (not just sub-clauses)
+    _q_art_ref = re.search(r"\bArticle\s+(\d+)", question, re.IGNORECASE) if not _art_subclause_m else _art_subclause_m
+    _inject_needed = _is_schedule_question or _is_conclusion_question or _art_subclause_m or _q_art_ref
 
     if _inject_needed and len(pages) > max_pages:
         top_pages = pages[:max_pages]
@@ -814,9 +827,9 @@ def answer_with_llm(
             _sub_l = _art_subclause_m.group(3)
             _subclause_pat = None
             if _sub_l:
+                # Letter sub-clauses like (j) are specific enough for injection
                 _subclause_pat = re.compile(rf"\({_sub_l}\)", re.IGNORECASE)
-            elif _sub_n:
-                _subclause_pat = re.compile(rf"\({_sub_n}\)", re.IGNORECASE)
+            # Skip numeric sub-clauses like (1), (2) — too generic, match everywhere
             if _subclause_pat:
                 # Find pages in top-k that reference this article
                 _art_ref_pages = [p["page_number"] for p in top_pages
@@ -827,6 +840,12 @@ def answer_with_llm(
         top_keys = {(p["doc_id"], p["page_number"]) for p in top_pages}
         _primary_doc_ids = {p["doc_id"] for p in top_pages}
         injected = []
+        # Check if top-k already contains the referenced Article
+        _ref_art_n = _q_art_ref.group(1) if _q_art_ref else None
+        _top_has_article = False
+        if _ref_art_n:
+            _ref_art_pat = re.compile(rf"\bArticle\s+{_ref_art_n}\b", re.IGNORECASE)
+            _top_has_article = any(_ref_art_pat.search(p.get("text", "")) for p in top_pages)
         for p in pages[max_pages:]:
             key = (p["doc_id"], p["page_number"])
             if key not in top_keys and p["doc_id"] in _primary_doc_ids:
@@ -844,6 +863,12 @@ def answer_with_llm(
                         # Only inject if within ±3 pages of article reference
                         if any(abs(p["page_number"] - rp) <= 3 for rp in _ref_pages):
                             _matched = True
+                # Direct article injection: if top-k doesn't have "Article N",
+                # inject the first page from the same doc that contains it.
+                if not _matched and _ref_art_n and not _top_has_article:
+                    if _ref_art_pat.search(p_text):
+                        _matched = True
+                        _top_has_article = True  # only inject once
                 if _matched:
                     injected.append(p)
         if injected:
@@ -907,10 +932,10 @@ def answer_with_llm(
     if is_comparison and answer_type in ("bool", "boolean"):
         _effective_max_tokens = 150  # Room for E1/E2/ANSWER/CITE with party names
     prompt = _build_prompt(question, answer_type, context, is_comparison=is_comparison)
-    # All-Haiku: Sonnet TTFT ~2000ms+ pushes F to 1.007 per Sonnet question.
-    # Net: -0.017 F vs +0.024 Asst×0.3 = marginal at best.
-    # Better to optimize G and Det with Haiku's speed advantage.
-    use_strong = False
+    # Sonnet for free_text: TTFT ~1500-2000ms (F=1.02) vs Haiku ~700ms (F=1.05).
+    # F drop per free_text Q: -0.03. Over 30 free_text / 100 total: avg F drop = 0.009.
+    # But Sonnet Asst improvement ~+0.10 → net gain: 0.3×0.10×G - 0.009 ≈ +0.016.
+    use_strong = (answer_type == "free_text")
 
     # Pass t0=None so TTFT measures only LLM API time (excludes retrieval/context building)
     raw, ttft_ms, _call_total, in_tok, out_tok, model = _call(
@@ -1095,6 +1120,13 @@ def answer_with_llm(
                             _art_ev = [p for p in _filtered_ev
                                        if (p["doc_id"], p["page_number"]) in _art_keys
                                        or (p["doc_id"], p["page_number"]) in _adj]
+                            # Also search _all_pages for adjacent not in filtered
+                            _ev_keys = {(p["doc_id"], p["page_number"]) for p in _art_ev}
+                            for ap in (_all_pages or []):
+                                ak = (ap["doc_id"], ap["page_number"])
+                                if ak in _adj and ak not in _ev_keys:
+                                    _art_ev.append(ap)
+                                    _ev_keys.add(ak)
                             _filtered_ev = _art_ev
                     source_pages = _filtered_ev  # REPLACE (evidence is more precise)
             else:
@@ -1270,6 +1302,13 @@ def answer_with_llm(
                 _keep = [p for p in source_pages
                          if (p["doc_id"], p["page_number"]) in _art_keys
                          or (p["doc_id"], p["page_number"]) in _adjacent]
+                # Also search _all_pages for adjacent pages not in source_pages
+                _keep_keys = {(p["doc_id"], p["page_number"]) for p in _keep}
+                for ap in (_all_pages or []):
+                    ak = (ap["doc_id"], ap["page_number"])
+                    if ak in _adjacent and ak not in _keep_keys:
+                        _keep.append(ap)
+                        _keep_keys.add(ak)
                 source_pages = _keep if _keep else _art_pages
 
     # Final page cap: tighter for non-comparison (single-doc questions) where
@@ -1281,7 +1320,7 @@ def answer_with_llm(
         }
     else:
         _MAX_CITED = {
-            "bool": 1, "boolean": 1, "number": 2, "date": 2,
+            "bool": 2, "boolean": 2, "number": 2, "date": 2,
             "name": 2, "names": 2, "free_text": 3,
         }
     _cap = _MAX_CITED.get(answer_type, 3)
