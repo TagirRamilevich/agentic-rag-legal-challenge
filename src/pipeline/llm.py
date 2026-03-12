@@ -668,7 +668,9 @@ def answer_with_llm(
     _inject_needed = _is_schedule_question or _is_conclusion_question or _art_subclause_m
 
     if _inject_needed and len(pages) > max_pages:
+        top_pages = pages[:max_pages]
         _inject_pats: list[re.Pattern] = []
+        _art_inject_pats_proximity = None
         if _is_schedule_question or _is_conclusion_question:
             _inject_pats.append(re.compile(
                 r"(?:^|\n)\s*SCHEDULE\s+\d|Maximum Fine|"
@@ -676,30 +678,46 @@ def answer_with_llm(
                 re.IGNORECASE,
             ))
         if _art_subclause_m:
-            # Build pattern for the specific sub-clause
             _art_n = _art_subclause_m.group(1)
             _sub_n = _art_subclause_m.group(2)
             _sub_l = _art_subclause_m.group(3)
+            _subclause_pat = None
             if _sub_l:
-                # e.g. Article 7(3)(j) → look for "(j)" on pages from same doc
-                _inject_pats.append(re.compile(rf"\({_sub_l}\)", re.IGNORECASE))
+                _subclause_pat = re.compile(rf"\({_sub_l}\)", re.IGNORECASE)
             elif _sub_n:
-                _inject_pats.append(re.compile(rf"\({_sub_n}\)", re.IGNORECASE))
-
-        top_pages = pages[:max_pages]
+                _subclause_pat = re.compile(rf"\({_sub_n}\)", re.IGNORECASE)
+            if _subclause_pat:
+                # Find pages in top-k that reference this article
+                _art_ref_pages = [p["page_number"] for p in top_pages
+                                  if re.search(rf"\bArticle\s+{_art_n}\b", p.get("text", ""), re.IGNORECASE)]
+                if not _art_ref_pages:
+                    _art_ref_pages = [p["page_number"] for p in top_pages]
+                _art_inject_pats_proximity = (_subclause_pat, _art_ref_pages)
         top_keys = {(p["doc_id"], p["page_number"]) for p in top_pages}
-        # Only inject from the primary document
         _primary_doc_ids = {p["doc_id"] for p in top_pages}
         injected = []
         for p in pages[max_pages:]:
             key = (p["doc_id"], p["page_number"])
             if key not in top_keys and p["doc_id"] in _primary_doc_ids:
                 p_text = p.get("text", "")
+                _matched = False
+                # Check schedule/conclusion patterns
                 for pat in _inject_pats:
                     if pat.search(p_text):
-                        injected.append(p)
+                        _matched = True
                         break
+                # Check article sub-clause with proximity constraint
+                if not _matched and _art_inject_pats_proximity:
+                    _sc_pat, _ref_pages = _art_inject_pats_proximity
+                    if _sc_pat.search(p_text):
+                        # Only inject if within ±3 pages of article reference
+                        if any(abs(p["page_number"] - rp) <= 3 for rp in _ref_pages):
+                            _matched = True
+                if _matched:
+                    injected.append(p)
         if injected:
+            # Limit injections to max 2 pages to avoid displacing too much context
+            injected = injected[:2]
             if len(injected) <= max_pages - 1:
                 pages = top_pages[:1] + injected + top_pages[1:max_pages - len(injected)]
             else:
