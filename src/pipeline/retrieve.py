@@ -30,32 +30,33 @@ def build_doc_routing_index(pages: list[dict]) -> dict:
     )
 
     for p in pages:
-        if p["page_number"] != 1:
+        if p["page_number"] > 2:
             continue
-        text = p["text"][:500]
+        text = p["text"][:800] if p["page_number"] == 1 else p["text"][:400]
         doc_id = p["doc_id"]
 
-        # Extract case numbers
+        # Extract case numbers (from page 1 and page 2)
         for case in _case_p.findall(text):
             case_norm = case.upper().replace("  ", " ")
             if case_norm not in case_to_doc:
                 case_to_doc[case_norm] = doc_id
 
-        # Extract law references
+        # Extract law references (primarily from page 1, but also page 2 for enactment notices)
         for law in _law_no_p.findall(text):
             law_norm = law.strip()
             if law_norm not in law_to_doc:
                 law_to_doc[law_norm] = doc_id
 
-        for law in _law_name_p.findall(text):
-            law_norm = law.strip()
-            if len(law_norm) > 8 and law_norm not in law_to_doc:
-                law_to_doc[law_norm] = doc_id
-        # Also extract ALL-CAPS law names and store as Title Case
-        for law in _law_name_caps_p.findall(text):
-            law_title = law.strip().title()  # "OPERATING LAW" → "Operating Law"
-            if len(law_title) > 8 and law_title not in law_to_doc:
-                law_to_doc[law_title] = doc_id
+        if p["page_number"] == 1:
+            for law in _law_name_p.findall(text):
+                law_norm = law.strip()
+                if len(law_norm) > 8 and law_norm not in law_to_doc:
+                    law_to_doc[law_norm] = doc_id
+            # Also extract ALL-CAPS law names and store as Title Case
+            for law in _law_name_caps_p.findall(text):
+                law_title = law.strip().title()  # "OPERATING LAW" → "Operating Law"
+                if len(law_title) > 8 and law_title not in law_to_doc:
+                    law_to_doc[law_title] = doc_id
 
     index = {"case": case_to_doc, "law": law_to_doc}
     _DOC_ROUTE_CACHE[key] = index
