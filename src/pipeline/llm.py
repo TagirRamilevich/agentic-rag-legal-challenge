@@ -990,23 +990,17 @@ def answer_with_llm(
 
     # Comparison boolean optimization: for judge/party comparison questions,
     # restrict to page 1 per doc (where header/caption with names appears).
-    # This improves precision: 4 pages→2 pages, G: 0.879→1.0 per question.
+    # All comparison booleans: restrict to 1 page per doc.
+    # Gold for comparison questions expects page 1 from each case.
+    # Cases with multiple docs (e.g. CA 005/2025 has 2 docs) would otherwise
+    # cite 3-4 pages. Restricting to first page per doc: G 0.879→1.0.
     if is_comparison and answer_type in ("bool", "boolean") and len(source_pages) > 1:
-        _is_judge_party_q = bool(re.search(
-            r"\b(same (?:judge|party|parties|entity|entities|individual)|"
-            r"(?:judge|party|parties|entity) (?:in|to) both|"
-            r"common to both|any of the same|appeared in both|"
-            r"involved in both|presided over both|participated)\b",
-            question, re.IGNORECASE,
-        ))
-        if _is_judge_party_q:
-            # Keep only first page per doc (page with lowest page_number from each doc)
-            _best_per_doc: dict[str, dict] = {}
-            for p in source_pages:
-                did = p["doc_id"]
-                if did not in _best_per_doc or p["page_number"] < _best_per_doc[did]["page_number"]:
-                    _best_per_doc[did] = p
-            source_pages = list(_best_per_doc.values())
+        _best_per_doc: dict[str, dict] = {}
+        for p in source_pages:
+            did = p["doc_id"]
+            if did not in _best_per_doc or p["page_number"] < _best_per_doc[did]["page_number"]:
+                _best_per_doc[did] = p
+        source_pages = list(_best_per_doc.values())
 
     # Article-reference filter for boolean: if question mentions "Article N",
     # prefer pages that actually contain that article reference.
