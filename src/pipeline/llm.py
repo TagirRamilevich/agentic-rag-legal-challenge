@@ -17,19 +17,19 @@ FREE_TEXT_MAX = 280
 _TYPE_CONFIG = {
     "bool":     {"max_pages": 4, "chars": 1200, "max_tokens": 30},
     "boolean":  {"max_pages": 4, "chars": 1200, "max_tokens": 30},
-    "number":   {"max_pages": 3, "chars": 1000, "max_tokens": 30},
-    "date":     {"max_pages": 3, "chars": 1000, "max_tokens": 30},
-    "name":     {"max_pages": 4, "chars": 1000, "max_tokens": 60},
-    "names":    {"max_pages": 4, "chars": 1200, "max_tokens": 160},
-    "free_text":{"max_pages": 4, "chars": 1500, "max_tokens": 250},
+    "number":   {"max_pages": 3, "chars": 900, "max_tokens": 30},
+    "date":     {"max_pages": 3, "chars": 900, "max_tokens": 30},
+    "name":     {"max_pages": 3, "chars": 900, "max_tokens": 60},
+    "names":    {"max_pages": 3, "chars": 1000, "max_tokens": 160},
+    "free_text":{"max_pages": 4, "chars": 1200, "max_tokens": 250},
 }
 _DEFAULT_CONFIG = {"max_pages": 3, "chars": 1200, "max_tokens": 256}
 
 _NOT_FOUND_RE = re.compile(
-    r"(does not (identify|contain|mention|provide|include|specify)|"
-    r"no (information|mention|reference|record)|"
+    r"(does not (identify|contain|mention|provide|include|specify|state|address|describe|define|disclose|indicate)|"
+    r"no (information|mention|reference|record|evidence|indication)|"
     r"cannot (be|find|determine)|"
-    r"not (found|available|present|identified|mentioned|specified|stated))",
+    r"not (found|available|present|identified|mentioned|specified|stated|addressed|disclosed|indicated|explicitly))",
     re.IGNORECASE,
 )
 
@@ -97,7 +97,7 @@ def _call(
                 max_tokens=max_tokens,
                 temperature=0,
                 messages=[{"role": "user", "content": prompt}],
-                timeout=8.0,
+                timeout=6.0,
             ) as stream:
                 for chunk in stream.text_stream:
                     if ttft_ms is None:
@@ -215,11 +215,13 @@ _TYPE_INSTRUCTIONS = {
         "If not found in context: null" + _CITE_SUFFIX
     ),
     "name": (
-        "Return ONLY the name or entity as a short phrase. "
+        "Return ONLY the name, entity, or specific term as a short phrase. "
         "Include the full legal name if available. "
+        "For 'what document/form/statement' questions: return the exact document type name (e.g. 'Confirmation Statement', 'Annual Return'). "
         "For 'which case' questions: return the case number (e.g. 'CFI 010/2024'). "
         "For 'which case was decided/issued earlier' questions: find the decision/issue date in each case document, compare the dates, and return the case number with the earlier date. "
         "For 'which party had higher/lower' questions: compare the values and return the correct one. "
+        "IMPORTANT: Return the SPECIFIC answer to the question, not the subject of the sentence. "
         "No explanation, no extra text. "
         "If not found in context: null" + _CITE_SUFFIX
     ),
@@ -234,10 +236,14 @@ _TYPE_INSTRUCTIONS = {
         "If genuinely not found: null" + _CITE_SUFFIX
     ),
     "free_text": (
-        f"Answer in 1-3 concise sentences (aim for 150-250 characters) using ONLY facts from the context. "
-        "Start directly with the factual answer — no preamble. "
-        "Include ALL key details: article numbers, names, dates, amounts, conditions. "
-        "If multiple aspects are asked, address each one. "
+        f"Answer in 2-3 concise sentences (~250 characters, max {FREE_TEXT_MAX}) using ONLY facts from the context. "
+        "Begin with the direct answer to the question — no preamble, no restating the question. "
+        "Every sentence must correspond to specific text in the context — no general legal knowledge or reasoning. "
+        "State only what the document explicitly says; never infer beyond the literal text. "
+        "Include key details: article numbers, names, dates, amounts, conditions. "
+        "If the question has multiple parts, address each one. "
+        "If the context partially answers, state what IS found and note what is not addressed. "
+        "If the context clearly answers, state it confidently without hedging. "
         "Do NOT use markdown or reference block numbers. "
         "DIFC courts do NOT have juries, plea bargains, criminal proceedings, Miranda rights, parole, or verdicts. "
         "If the question asks about concepts that don't exist in DIFC courts, "
@@ -259,6 +265,19 @@ def _distill_page(text: str, question: str, max_chars: int) -> str:
     if len(paragraphs) <= 1:
         return text[:max_chars]
 
+    # Merge very short fragments (section numbers, sub-clause markers) into
+    # the following paragraph. Legal docs put "28.", "(1)" on their own lines.
+    merged: list[str] = []
+    for para in paragraphs:
+        para = para.strip()
+        if not para:
+            continue
+        if merged and len(merged[-1]) < 15:
+            merged[-1] = merged[-1] + "\n" + para
+        else:
+            merged.append(para)
+    paragraphs = merged
+
     # Score paragraphs by keyword overlap with question
     q_words = set(w.lower() for w in re.sub(r"[^\w\s]", " ", question).split() if len(w) > 2)
     # Check for specific article reference to boost matching paragraphs
@@ -271,6 +290,7 @@ def _distill_page(text: str, question: str, max_chars: int) -> str:
     _is_party_q = bool(re.search(r"\b(claimant|defendant|respondent|party|parties|judge|issued|date of issue)\b", question, re.IGNORECASE))
     _is_outcome_q = bool(re.search(r"\b(result|outcome|rul(?:e|ed|ing)|ordered|decision|decided|conclud(?:e|ed|ing)|conclusion)\b", question, re.IGNORECASE))
     scored = []
+    _art_para_indices: set[int] = set()  # Track paragraphs with article references
     for i, para in enumerate(paragraphs):
         para = para.strip()
         if not para:
@@ -280,11 +300,16 @@ def _distill_page(text: str, question: str, max_chars: int) -> str:
         # Bonus for paragraphs containing the specific article reference
         if art_num:
             # Strong match: "Article N" or "N." at start (article heading)
-            if re.search(rf"\bArticle\s+{art_num}\b|(?:^|\n)\s*{art_num}\.\s", para, re.IGNORECASE):
+            if re.search(rf"\bArticle\s+{art_num}\b|(?:^|\n)\s*{art_num}\.(?:\s|$)", para, re.IGNORECASE):
                 score += 5
+                _art_para_indices.add(i)
                 # Extra bonus if sub-clause matches too
                 if _subclause and _subclause in para:
                     score += 3
+            # Match "(1)" sub-clause (e.g., "16(1)") indicating article content
+            elif re.search(rf"\b{art_num}\(", para):
+                score += 4
+                _art_para_indices.add(i)
             # Weak match: just the number (sub-clause reference)
             elif re.search(rf"\b{art_num}\b", para):
                 score += 2
@@ -299,13 +324,38 @@ def _distill_page(text: str, question: str, max_chars: int) -> str:
         # Always keep first paragraph (often has title/header info)
         if i == 0:
             score += 1
-        scored.append((score, para))
+        scored.append((score, i, para))
+
+    # Boost neighboring paragraphs of article-matched paras.
+    # Preceding: often article headings (e.g., "Confirmation Statement" before "16(1)...")
+    # Following: article content when number and content split across paragraphs
+    # (e.g., "28.\n" splits from "Liability of Partners\n(1) Unless...")
+    if art_num and _art_para_indices:
+        _max_orig_i = max(orig_i for _, orig_i, _ in scored) if scored else 0
+        for idx in list(_art_para_indices):
+            # Boost preceding paragraph (heading)
+            if idx > 0:
+                for j, (s, orig_i, p) in enumerate(scored):
+                    if orig_i == idx - 1 and s < 3:
+                        if len(p) < 100:
+                            scored[j] = (s + 4, orig_i, p)
+                        else:
+                            scored[j] = (s + 2, orig_i, p)
+            # Boost following paragraph (article content after short number line)
+            # Only if the article paragraph itself is very short (just "28." etc.)
+            _art_para_len = next((len(p) for _, orig_i, p in scored if orig_i == idx), 999)
+            if _art_para_len < 30 and idx < _max_orig_i:
+                for j, (s, orig_i, p) in enumerate(scored):
+                    if orig_i == idx + 1:
+                        scored[j] = (max(s, 5), orig_i, p)
+                        _art_para_indices.add(idx + 1)
+                        break
 
     # Sort by relevance, take top paragraphs fitting max_chars
     scored.sort(key=lambda x: -x[0])
     result_parts = []
     total = 0
-    for score, para in scored:
+    for score, _orig_i, para in scored:
         if total + len(para) > max_chars:
             if not result_parts:
                 result_parts.append(para[:max_chars])
@@ -477,6 +527,9 @@ def _parse(raw: str, answer_type: str) -> Any:
         text = raw.replace("**", "")
         # Strip block/context references that leak implementation details
         text = re.sub(r"\s*\(?\bBlock \d+\)?\s*", " ", text)
+        # Strip filler prefixes that waste characters without adding value
+        text = re.sub(r"^(?:According to the (?:context|provided (?:documents?|context|text)),?\s*)", "", text, flags=re.IGNORECASE)
+        text = re.sub(r"^(?:Based on the (?:provided |given )?(?:context|documents?|text),?\s*)", "", text, flags=re.IGNORECASE)
         text = re.sub(r"\s+", " ", text).strip()
         if text.startswith(FREE_TEXT_FALLBACK[:30]):
             return FREE_TEXT_FALLBACK
@@ -484,13 +537,19 @@ def _parse(raw: str, answer_type: str) -> Any:
             # Smart truncation: prefer sentence boundary, then word boundary
             truncated = text[:FREE_TEXT_MAX]
             # Try to end at last sentence-ending punctuation
-            last_period = max(truncated.rfind(". "), truncated.rfind(".)"), truncated.rfind('."'))
-            if last_period > FREE_TEXT_MAX * 0.6:
+            last_period = max(
+                truncated.rfind(". "),
+                truncated.rfind(".)"),
+                truncated.rfind('."'),
+                # Also check period at very end of truncated string
+                len(truncated) - 1 if truncated.endswith(".") else -1,
+            )
+            if last_period > FREE_TEXT_MAX * 0.5:
                 text = truncated[:last_period + 1]
             else:
                 # Fall back to last space (avoid mid-word cut)
                 last_space = truncated.rfind(" ")
-                if last_space > FREE_TEXT_MAX * 0.7:
+                if last_space > FREE_TEXT_MAX * 0.5:
                     text = truncated[:last_space].rstrip(",;:—-") + "."
                 else:
                     text = truncated
@@ -528,13 +587,26 @@ def _date_search_variants(iso: str) -> list[str]:
         return [iso]
 
 
+_NUM_WORDS = {
+    1: "one", 2: "two", 3: "three", 4: "four", 5: "five",
+    6: "six", 7: "seven", 8: "eight", 9: "nine", 10: "ten",
+    11: "eleven", 12: "twelve", 13: "thirteen", 14: "fourteen", 15: "fifteen",
+    16: "sixteen", 17: "seventeen", 18: "eighteen", 19: "nineteen", 20: "twenty",
+    21: "twenty-one", 25: "twenty-five", 30: "thirty", 40: "forty", 45: "forty-five",
+    50: "fifty", 60: "sixty", 90: "ninety",
+}
+
+
 def _number_search_variants(v: Any) -> list[str]:
     try:
         n = float(v)
         if n == int(n):
             i = int(n)
-            # Small numbers (< 100) appear too frequently; rely on top-page fallback
             if i < 100:
+                # Legal docs use "word (digit)" format: "twelve (12) months"
+                word = _NUM_WORDS.get(i)
+                if word:
+                    return [f"{word} ({i})", word]
                 return []
             return [str(i), f"{i:,}"]
         return [str(n)]
@@ -833,11 +905,12 @@ def answer_with_llm(
     # Comparison booleans get chain-of-thought prompt with higher max_tokens
     _effective_max_tokens = max_tokens
     if is_comparison and answer_type in ("bool", "boolean"):
-        _effective_max_tokens = 200  # Room for E1/E2/ANSWER/CITE with party names
+        _effective_max_tokens = 150  # Room for E1/E2/ANSWER/CITE with party names
     prompt = _build_prompt(question, answer_type, context, is_comparison=is_comparison)
-    # Use Sonnet for free_text only (better Asst). Haiku is better for booleans
-    # (Sonnet returns null too often on comparison booleans — too cautious).
-    use_strong = (answer_type == "free_text")
+    # All-Haiku: Sonnet TTFT ~2000ms+ pushes F to 1.007 per Sonnet question.
+    # Net: -0.017 F vs +0.024 Asst×0.3 = marginal at best.
+    # Better to optimize G and Det with Haiku's speed advantage.
+    use_strong = False
 
     # Pass t0=None so TTFT measures only LLM API time (excludes retrieval/context building)
     raw, ttft_ms, _call_total, in_tok, out_tok, model = _call(
@@ -877,14 +950,14 @@ def answer_with_llm(
         if answer == FREE_TEXT_FALLBACK or answer is None:
             total_ms2 = max(1, int((time.perf_counter() - _t0) * 1000))
             return FREE_TEXT_FALLBACK, [], ttft_ms, total_ms2, in_tok, out_tok, model
-        # Use cited pages if valid; fallback to ALL context pages (β=2.5 rewards recall)
+        # Use cited pages if valid; fallback to context pages.
+        # β=2.5 heavily penalizes missing gold pages (6.25x vs extra pages).
+        # Missing 1 gold page: G drops from 1.0 to 0.537. Extra page: 1.0 to 0.879.
+        # So err on the side of citing more pages (context_pages[:3]) when uncertain.
         if ft_indices:
             used_pages = [context_pages[i] for i in ft_indices]
-            # Trust LLM citation for free_text (Sonnet is accurate).
-            # Skip ±1 expansion to improve precision: for 1-page gold,
-            # citing 3 pages (P=0.33) gives G=0.78 vs G=1.0 for 1 page.
         else:
-            used_pages = context_pages[:2]  # no citation → top 2 pages
+            used_pages = context_pages[:3]  # no citation → top 3 (recall > precision)
         # Page-specific questions: restrict to that specific page
         _specific_ft = _detect_specific_page(question, used_pages, all_pages=pages)
         if _specific_ft:
@@ -892,14 +965,69 @@ def answer_with_llm(
         # Safety: ensure non-null answer always has pages
         if not used_pages and context_pages:
             used_pages = context_pages[:1]
-        # Cap free_text pages to avoid precision loss
-        if len(used_pages) > 3:
-            used_pages = used_pages[:3]
+        # β=2.5 minimum recall: ensure at least 2 pages for non-specific questions.
+        # Missing 1 gold page: G=0.537. Extra 1 page: G=0.879. Recall >> precision.
+        if len(used_pages) == 1 and len(context_pages) >= 2 and not _specific_ft:
+            _existing = {(p["doc_id"], p["page_number"]) for p in used_pages}
+            for cp in context_pages:
+                if (cp["doc_id"], cp["page_number"]) not in _existing:
+                    used_pages.append(cp)
+                    break
+        # Cap free_text pages: β=2.5 rewards recall heavily, so allow more pages.
+        # Missing gold page costs 6.25x more than extra page.
+        _ft_cap = 4 if is_comparison else 3
+        if len(used_pages) > _ft_cap:
+            used_pages = used_pages[:_ft_cap]
         total_ms2 = max(1, int((time.perf_counter() - _t0) * 1000))
         return answer, used_pages, ttft_ms, total_ms2, in_tok, out_tok, model
 
     # For non-free_text: parse answer from cleaned text (CITE suffix removed)
     answer = _parse(clean_raw, answer_type)
+
+    # Post-LLM verification for number answers: detect article-number confusion.
+    # If the answer matches the article number from the question, the LLM likely
+    # returned the article number instead of the value. Search ALL retrieved pages
+    # (not just context_pages) for the actual article content with a different number.
+    if answer_type == "number" and answer is not None:
+        _q_art_ref = re.search(r"\bArticle\s+(\d+)", question, re.IGNORECASE)
+        if _q_art_ref and int(_q_art_ref.group(1)) == answer:
+            # Search ALL retrieved pages (broader than context_pages)
+            _search_pages = _all_pages if _all_pages else context_pages
+            from src.pipeline.answer import extract_number
+            det_num, det_pg = extract_number(_search_pages, question)
+            if det_num is not None and det_num != answer:
+                answer = det_num
+                if det_pg:
+                    clean_raw = str(answer)
+                    cited_indices = []  # will use _find_source_pages
+
+    # Post-LLM verification for name answers: if the answer looks like a generic
+    # description (starts with articles/pronouns, or is the subject of the sentence
+    # rather than the specific entity), try deterministic extraction.
+    if answer_type == "name" and isinstance(answer, str) and context_pages:
+        _generic_name_re = re.compile(
+            r"^(Every|The|A|An|All|Each|No|Any)\s",
+            re.IGNORECASE,
+        )
+        if _generic_name_re.match(answer) or len(answer) > 80:
+            from src.pipeline.answer import extract_name
+            det_name, det_pg = extract_name(context_pages, question)
+            if det_name is not None and det_name != answer:
+                answer = det_name
+                if det_pg:
+                    cited_indices = []
+
+    # Post-LLM verification for comparison date-name questions:
+    # Trust deterministic date extraction over LLM for "which case has earlier date" questions.
+    if answer_type == "name" and is_comparison and isinstance(answer, str):
+        _q_lower_cmp = question.lower()
+        if re.search(r"\b(earlier|later|first)\b.*\b(date|issue)", _q_lower_cmp):
+            from src.pipeline.answer import _extract_comparison_date_name
+            _det_cmp, _det_cmp_pg = _extract_comparison_date_name(pages, question)
+            if _det_cmp is not None and _det_cmp != answer:
+                answer = _det_cmp
+                if _det_cmp_pg:
+                    cited_indices = []
 
     total_ms_final = max(1, int((time.perf_counter() - _t0) * 1000))
 
@@ -920,6 +1048,24 @@ def answer_with_llm(
     else:
         source_pages = _find_source_pages(answer, context_pages, answer_type)
 
+    # Article-page verification: if question references "Article N" and the cited
+    # page(s) don't contain that article, replace with a page that does.
+    # This catches LLM citation errors (citing a nearby page instead of the article page).
+    # Search _all_pages (full retrieved list), not just context_pages, for better recall.
+    if not is_comparison and source_pages and answer_type in ("bool", "boolean", "number", "date", "name"):
+        _q_art_verify = re.search(r"\bArticle\s+(\d+)", question, re.IGNORECASE)
+        if _q_art_verify:
+            _art_v_num = _q_art_verify.group(1)
+            _art_v_pat = re.compile(rf"\bArticle\s+{_art_v_num}\b|(?:^|\n)\s*{_art_v_num}\.\s", re.IGNORECASE)
+            _has_article = any(_art_v_pat.search(p.get("text", "")) for p in source_pages)
+            if not _has_article:
+                # Find a page with this article from the same doc(s) — search ALL retrieved pages
+                _cited_docs = {p["doc_id"] for p in source_pages}
+                _search_pool = _all_pages if _all_pages else context_pages
+                for cp in _search_pool:
+                    if cp["doc_id"] in _cited_docs and _art_v_pat.search(cp.get("text", "")):
+                        source_pages = [cp]
+                        break
 
     # Post-citation verification for text-matchable types:
     # For non-comparison: PREFER evidence-verified pages from the primary doc.
@@ -927,13 +1073,23 @@ def answer_with_llm(
     # which is more reliable than LLM citation for extractive types.
     # For comparison: UNION (need pages from both docs).
     if answer_type in ("number", "date", "name", "names"):
-        evidence_pages = _find_source_pages(answer, pages, answer_type)
+        evidence_pages = _find_source_pages(answer, _all_pages, answer_type)
         if evidence_pages:
             if not is_comparison and answer_type in ("number", "date", "name"):
                 # Restrict evidence to docs already cited by LLM
                 _primary_docs = {p["doc_id"] for p in source_pages}
                 _filtered_ev = [p for p in evidence_pages if p["doc_id"] in _primary_docs]
                 if _filtered_ev:
+                    # If question references Article N, prefer evidence pages
+                    # that also contain that article (avoids citing a page where
+                    # the answer value appears in a DIFFERENT article).
+                    _q_art_ev = re.search(r"\bArticle\s+(\d+)", question, re.IGNORECASE)
+                    if _q_art_ev and len(_filtered_ev) > 1:
+                        _art_ev_n = _q_art_ev.group(1)
+                        _art_ev_pat = re.compile(rf"\bArticle\s+{_art_ev_n}\b|(?:^|\n)\s*{_art_ev_n}\.\s", re.IGNORECASE)
+                        _art_ev = [p for p in _filtered_ev if _art_ev_pat.search(p.get("text", ""))]
+                        if _art_ev:
+                            _filtered_ev = _art_ev
                     source_pages = _filtered_ev  # REPLACE (evidence is more precise)
             else:
                 # UNION for comparison/names (need cross-doc coverage)
@@ -1014,29 +1170,37 @@ def answer_with_llm(
                             _existing_keys.add(key)
                             break  # one article page is enough
 
-    # For comparison questions: ensure at least 1 page per RELEVANT doc is cited.
-    # Gold expects citations from BOTH documents being compared.
-    # Only add docs that match case/law references in the question (not random context docs).
+    # For comparison questions: ensure at least 1 page per CASE is cited.
+    # Gold expects citations from BOTH cases being compared.
+    # Map case references to context docs, find missing cases, add 1 page each.
     if is_comparison:
-        cited_doc_ids = {p["doc_id"] for p in source_pages}
-        # Find which context docs are referenced by the question
         _case_refs_q = re.findall(r"[A-Z]{2,5}\s+\d{3}/\d{4}", question)
-        _relevant_docs: set[str] = set()
-        for cp in context_pages:
-            cp_text = cp.get("text", "")
-            for cr in _case_refs_q:
-                if cr.replace(" ", "") in cp_text.replace(" ", ""):
-                    _relevant_docs.add(cp["doc_id"])
-                    break
-        # If no case refs, all context docs are potentially relevant
-        if not _relevant_docs:
-            _relevant_docs = {p["doc_id"] for p in context_pages}
-        missing_docs = _relevant_docs - cited_doc_ids
-        for missing_doc in missing_docs:
+        if _case_refs_q:
+            # Map each case → set of doc_ids
+            _case_to_docs: dict[str, set[str]] = {}
             for cp in context_pages:
-                if cp["doc_id"] == missing_doc:
-                    source_pages.append(cp)
-                    break
+                cp_text = cp.get("text", "")
+                for cr in _case_refs_q:
+                    if cr.replace(" ", "") in cp_text.replace(" ", ""):
+                        _case_to_docs.setdefault(cr, set()).add(cp["doc_id"])
+            # Check which cases are already cited
+            cited_doc_ids = {p["doc_id"] for p in source_pages}
+            for cr, case_docs in _case_to_docs.items():
+                if not (case_docs & cited_doc_ids):
+                    # No page from this case — add page 1 from first available doc
+                    for cp in context_pages:
+                        if cp["doc_id"] in case_docs:
+                            source_pages.append(cp)
+                            break
+        else:
+            # No case refs: fallback to 1 page per doc
+            cited_doc_ids = {p["doc_id"] for p in source_pages}
+            _relevant_docs = {p["doc_id"] for p in context_pages}
+            for missing_doc in _relevant_docs - cited_doc_ids:
+                for cp in context_pages:
+                    if cp["doc_id"] == missing_doc:
+                        source_pages.append(cp)
+                        break
 
     # Page-specific questions: if question mentions a specific page ("last page",
     # "first page", "page 2", "title page"), restrict citations to that page only.
@@ -1044,49 +1208,41 @@ def answer_with_llm(
     if _specific_page:
         source_pages = _specific_page
     else:
-        # Adaptive expansion strategy:
-        # - For boolean WITH LLM citation: trust citation (no expansion)
-        #   Math: 1 gold page, cite 1 → G=1.0 vs cite 2 (±1) → G=0.879
-        #   For 13 non-comparison booleans: +0.121 × ~8 / 100 ≈ +0.01 G
-        # - For boolean WITHOUT citation: ±1 for safety
-        # - For number/date/name/names: ±1 only if we have few evidence pages
-        added: set[tuple[str, int]] = {(p["doc_id"], p["page_number"]) for p in source_pages}
-        extra: list[dict] = []
-        if answer_type in ("bool", "boolean"):
-            if cited_indices:
-                max_delta = 0  # trust LLM citation — expansion hurts precision
-            else:
-                max_delta = 1  # no citation → expand for safety
-        elif len(source_pages) <= 1:
-            # Only 1 evidence page found — expand ±1 for safety
-            max_delta = 1
-        else:
-            # Multiple evidence pages already found — skip expansion for precision
-            max_delta = 0
-        if max_delta > 0:
-            for src in list(source_pages):
-                for cp in pages:
-                    key = (cp["doc_id"], cp["page_number"])
-                    if key not in added and cp["doc_id"] == src["doc_id"]:
-                        delta = abs(cp["page_number"] - src["page_number"])
-                        if delta <= max_delta:
-                            extra.append(cp)
-                            added.add(key)
-            source_pages.extend(extra)
+        # No expansion — trust evidence/citation pages directly.
+        # Math: for gold=1 page, cite 1 correct → G=1.0 vs cite 2 (±1) → G=0.879.
+        # Expansion only helps if we'd miss a gold page, but with good retrieval
+        # and evidence matching, the risk is low. Precision gain outweighs recall risk.
+        pass
 
-    # Comparison boolean optimization: for judge/party comparison questions,
-    # restrict to page 1 per doc (where header/caption with names appears).
-    # All comparison booleans: restrict to 1 page per doc.
-    # Gold for comparison questions expects page 1 from each case.
-    # Cases with multiple docs (e.g. CA 005/2025 has 2 docs) would otherwise
-    # cite 3-4 pages. Restricting to first page per doc: G 0.879→1.0.
+    # Comparison optimization: restrict to 1 page per CASE (not per doc).
+    # Gold expects 1 page per case. Cases with multiple docs (e.g. DEC 001/2025
+    # has 2 docs) would otherwise cite 3+ pages. Grouping by case: G 0.936→1.0.
     if is_comparison and answer_type in ("bool", "boolean", "name") and len(source_pages) > 1:
-        _best_per_doc: dict[str, dict] = {}
+        # Map each doc_id to its case reference
+        _case_refs_in_q = re.findall(r"[A-Z]{2,5}\s+\d{3}/\d{4}", question)
+        _doc_to_case: dict[str, str] = {}
         for p in source_pages:
-            did = p["doc_id"]
-            if did not in _best_per_doc or p["page_number"] < _best_per_doc[did]["page_number"]:
-                _best_per_doc[did] = p
-        source_pages = list(_best_per_doc.values())
+            p_text = p.get("text", "")
+            for cr in _case_refs_in_q:
+                if cr.replace(" ", "") in p_text.replace(" ", ""):
+                    _doc_to_case[p["doc_id"]] = cr
+                    break
+        # Group by case and keep lowest page from each case
+        if _doc_to_case:
+            _best_per_case: dict[str, dict] = {}
+            for p in source_pages:
+                case = _doc_to_case.get(p["doc_id"], p["doc_id"])  # fallback to doc_id
+                if case not in _best_per_case or p["page_number"] < _best_per_case[case]["page_number"]:
+                    _best_per_case[case] = p
+            source_pages = list(_best_per_case.values())
+        else:
+            # Fallback: 1 page per doc
+            _best_per_doc: dict[str, dict] = {}
+            for p in source_pages:
+                did = p["doc_id"]
+                if did not in _best_per_doc or p["page_number"] < _best_per_doc[did]["page_number"]:
+                    _best_per_doc[did] = p
+            source_pages = list(_best_per_doc.values())
 
     # Article-reference filter: if question mentions "Article N",
     # prefer pages that actually contain that article reference.
@@ -1113,7 +1269,7 @@ def answer_with_llm(
         }
     else:
         _MAX_CITED = {
-            "bool": 2, "boolean": 2, "number": 2, "date": 2,
+            "bool": 1, "boolean": 1, "number": 2, "date": 2,
             "name": 2, "names": 2, "free_text": 3,
         }
     _cap = _MAX_CITED.get(answer_type, 3)

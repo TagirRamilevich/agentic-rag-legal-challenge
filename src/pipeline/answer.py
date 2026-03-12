@@ -199,16 +199,29 @@ def _extract_comparison_date_name(
         text = page["text"]
         for ref in case_refs:
             if ref in text or ref.replace(" ", "") in text.replace(" ", ""):
-                # Look for Date of Issue or any date near the case reference
+                if ref in case_dates:
+                    continue
+                # 1) Look for explicit "Date of Issue"
                 doi_m = re.search(r"Date\s+of\s+Issue[:\s]*([^\n]+)", text, re.IGNORECASE)
                 if doi_m:
                     d = _extract_date_from_text(doi_m.group(1))
-                    if d and ref not in case_dates:
-                        case_dates[ref] = (d, page)
-                elif ref not in case_dates:
-                    d = _extract_date_from_text(text[:500])
                     if d:
                         case_dates[ref] = (d, page)
+                        continue
+                # 2) Look for header date: "MONTH DD, YYYY COURT/SCT/..." (common case doc format)
+                hdr_m = re.search(
+                    rf"\b({_MONTH_PATTERN})\s+(\d{{1,2}}),?\s+(\d{{4}})\s+(?:COURT|SMALL|SCT|ARBITRATION|ENFORCEMENT)",
+                    text[:400], re.IGNORECASE,
+                )
+                if hdr_m:
+                    mo = _MONTH_MAP.get(hdr_m.group(1).lower(), 1)
+                    d_str = f"{hdr_m.group(3)}-{mo:02d}-{int(hdr_m.group(2)):02d}"
+                    case_dates[ref] = (d_str, page)
+                    continue
+                # 3) Fallback: first date in first 500 chars
+                d = _extract_date_from_text(text[:500])
+                if d:
+                    case_dates[ref] = (d, page)
 
     if len(case_dates) >= 2:
         q_lower = question.lower()
@@ -232,8 +245,28 @@ def extract_name(
         if result is not None:
             return result, used
 
+    # For "what document/form/statement must" questions: extract the specific document type
+    if re.search(r"\b(what\s+document|what\s+form|what\s+statement|what\s+report|what\s+certificate)\b", q_lower):
+        # Look for patterns like "file... a [DOCUMENT]", "submit a [DOCUMENT]"
+        # Limit to 1-3 capitalized words (document names are short)
+        _doc_pat = re.compile(
+            r"(?:file|submit|produce|deliver|furnish|provide|prepare|lodge)\s+"
+            r"(?:with\s+\w+\s*,?\s*)?(?:a|an|the)\s+"
+            r"([A-Z][a-zA-Z]+(?:\s+[A-Z][a-zA-Z]+){0,2})",
+        )
+        for page in pages:
+            for sent in _sentences(page["text"]):
+                m = _doc_pat.search(sent)
+                if m:
+                    doc_name = m.group(1).strip()
+                    if len(doc_name) > 3 and doc_name.lower() not in _STOPWORDS:
+                        return doc_name, [page]
+
     keywords = _keywords(question)
     best_name, best_page, best_score = None, None, -1
+
+    # Filter out generic subjects that are not entity names
+    _generic_prefixes = {"Every", "The", "A", "An", "All", "Each", "No", "Any"}
 
     for page in pages:
         for sent in _sentences(page["text"]):
@@ -241,7 +274,9 @@ def extract_name(
             if score > 0:
                 candidates = [
                     n for n in _PROPER_NOUN_RE.findall(sent)
-                    if n.lower() not in _STOPWORDS and len(n) > 3
+                    if n.lower() not in _STOPWORDS
+                    and len(n) > 3
+                    and n.split()[0] not in _generic_prefixes
                 ]
                 if candidates and score > best_score:
                     best_score = score
