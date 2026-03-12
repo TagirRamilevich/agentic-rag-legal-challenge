@@ -638,6 +638,9 @@ def retrieve_pages(
                 if j not in top_indices:
                     top_indices.append(j)
 
+    # Extract case references early (used by multiple blocks below)
+    case_refs = _CASE_RE.findall(question)
+
     # "Date of Issue" / "issued earlier" questions: ensure p.1 of each referenced case
     # is included with _priority (issue dates are on the first page of case docs).
     _is_date_of_issue_q = bool(re.search(
@@ -726,7 +729,7 @@ def retrieve_pages(
     # Case-specific questions: for short case documents (<= 5 pages),
     # always include all pages when the question references the case number.
     # Tag them with _priority so the reranker won't drop them.
-    case_refs = _CASE_RE.findall(question)
+    # (case_refs already extracted above)
     # Extract question content words for case page relevance scoring
     _case_q_words = set(
         w.lower() for w in re.findall(r"[a-zA-Z]{4,}", question)
