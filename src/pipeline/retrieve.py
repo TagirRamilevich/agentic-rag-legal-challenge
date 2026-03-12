@@ -233,8 +233,6 @@ def is_comparison_question(question: str) -> bool:
     if not _COMPARISON_RE.search(question):
         return False
     # Must also have two distinct references (case numbers OR law names)
-    if len(cases) >= 2:
-        return True
     laws = _LAW_REF_RE.findall(question)
     if len(laws) >= 2:
         return True

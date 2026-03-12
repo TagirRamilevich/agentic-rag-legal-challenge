@@ -374,6 +374,20 @@ def _parse(raw: str, answer_type: str) -> Any:
         if _word_num:
             raw = _word_num.group(1)
         val = parse_number(raw)
+        # Fallback: word-number conversion if parse_number failed
+        if val is None:
+            _WORD_NUMS = {
+                "one": 1, "two": 2, "three": 3, "four": 4, "five": 5,
+                "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10,
+                "eleven": 11, "twelve": 12, "thirteen": 13, "fourteen": 14,
+                "fifteen": 15, "sixteen": 16, "seventeen": 17, "eighteen": 18,
+                "nineteen": 19, "twenty": 20, "thirty": 30, "forty": 40,
+                "fifty": 50, "sixty": 60, "ninety": 90, "hundred": 100,
+            }
+            for word, num in _WORD_NUMS.items():
+                if word in raw.lower().split():
+                    val = num
+                    break
         # LLM should return non-negative for counts/durations; only allow
         # negative if the raw text explicitly has a minus sign
         if val is not None and val < 0 and "-" not in raw:
@@ -386,6 +400,21 @@ def _parse(raw: str, answer_type: str) -> Any:
             y, mo, d = (int(x) for x in m.group().split("-"))
             if 1900 <= y <= 2100 and 1 <= mo <= 12 and 1 <= d <= 31:
                 return m.group()
+        # Fallback: parse "15 March 2024" or "March 15, 2024" if LLM didn't format correctly
+        _month_map = {
+            "january": 1, "february": 2, "march": 3, "april": 4, "may": 5, "june": 6,
+            "july": 7, "august": 8, "september": 9, "october": 10, "november": 11, "december": 12,
+        }
+        m2 = re.search(r"(\d{1,2})\s+(\w+)\s+(\d{4})", raw)
+        if m2:
+            mo = _month_map.get(m2.group(2).lower())
+            if mo:
+                return f"{m2.group(3)}-{mo:02d}-{int(m2.group(1)):02d}"
+        m3 = re.search(r"(\w+)\s+(\d{1,2}),?\s+(\d{4})", raw)
+        if m3:
+            mo = _month_map.get(m3.group(1).lower())
+            if mo:
+                return f"{m3.group(3)}-{mo:02d}-{int(m3.group(2)):02d}"
         return None
 
     if answer_type == "names":
