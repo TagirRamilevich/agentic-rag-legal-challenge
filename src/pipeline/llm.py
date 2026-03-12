@@ -821,20 +821,11 @@ def answer_with_llm(
         # Use cited pages if valid; fallback to ALL context pages (β=2.5 rewards recall)
         if ft_indices:
             used_pages = [context_pages[i] for i in ft_indices]
-            # Add ±1 adjacent pages for recall (balanced with precision)
-            added_ft: set[tuple[str, int]] = {(p["doc_id"], p["page_number"]) for p in used_pages}
-            extra_ft: list[dict] = []
-            for src in list(used_pages):
-                for cp in pages:
-                    key_ft = (cp["doc_id"], cp["page_number"])
-                    if key_ft not in added_ft and cp["doc_id"] == src["doc_id"]:
-                        delta = abs(cp["page_number"] - src["page_number"])
-                        if delta <= 1:
-                            extra_ft.append(cp)
-                            added_ft.add(key_ft)
-            used_pages.extend(extra_ft)
+            # Trust LLM citation for free_text (Sonnet is accurate).
+            # Skip ±1 expansion to improve precision: for 1-page gold,
+            # citing 3 pages (P=0.33) gives G=0.78 vs G=1.0 for 1 page.
         else:
-            used_pages = context_pages  # cite all context pages for recall
+            used_pages = context_pages[:2]  # no citation → top 2 pages
         # Page-specific questions: restrict to that specific page
         _specific_ft = _detect_specific_page(question, used_pages, all_pages=pages)
         if _specific_ft:
@@ -843,8 +834,8 @@ def answer_with_llm(
         if not used_pages and context_pages:
             used_pages = context_pages[:1]
         # Cap free_text pages to avoid precision loss
-        if len(used_pages) > 5:
-            used_pages = used_pages[:5]
+        if len(used_pages) > 3:
+            used_pages = used_pages[:3]
         total_ms2 = max(1, int((time.perf_counter() - _t0) * 1000))
         return answer, used_pages, ttft_ms, total_ms2, in_tok, out_tok, model
 
