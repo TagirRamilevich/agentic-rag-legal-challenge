@@ -1381,9 +1381,10 @@ def answer_with_llm(
                     if _vk not in {(p["doc_id"], p["page_number"]) for p in source_pages}:
                         source_pages.insert(0, _verified_subclause_page)
 
-    # Adjacent page expansion for extractive types: articles/clauses span pages.
+    # Adjacent page expansion for non-comparison types: articles/clauses span pages.
     # β=2.5 means missing a page costs 3.8x more than an extra page.
     # Only expand from pages in retrieved pool (not random pages).
+    # Skip comparison: gold expects 1 page per case, extra pages hurt precision.
     if not is_comparison and source_pages and answer_type in ("bool", "boolean", "number", "date", "name", "names"):
         _exp_existing = {(p["doc_id"], p["page_number"]) for p in source_pages}
         _exp_adj = set()
