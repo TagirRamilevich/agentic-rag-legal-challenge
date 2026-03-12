@@ -994,7 +994,7 @@ def answer_with_llm(
     # Gold for comparison questions expects page 1 from each case.
     # Cases with multiple docs (e.g. CA 005/2025 has 2 docs) would otherwise
     # cite 3-4 pages. Restricting to first page per doc: G 0.879→1.0.
-    if is_comparison and answer_type in ("bool", "boolean") and len(source_pages) > 1:
+    if is_comparison and answer_type in ("bool", "boolean", "name") and len(source_pages) > 1:
         _best_per_doc: dict[str, dict] = {}
         for p in source_pages:
             did = p["doc_id"]
