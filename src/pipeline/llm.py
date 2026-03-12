@@ -46,6 +46,7 @@ _FALSE_RE = re.compile(
 
 
 _ANTHROPIC_CLIENT = None
+_PROVIDER_DISABLED: set[str] = set()  # Providers that hit permanent errors (e.g. spending limit)
 
 
 def _get_anthropic_client():
@@ -58,11 +59,11 @@ def _get_anthropic_client():
 
 
 def _provider() -> Optional[str]:
-    if os.getenv("ANTHROPIC_API_KEY"):
+    if os.getenv("ANTHROPIC_API_KEY") and "anthropic" not in _PROVIDER_DISABLED:
         return "anthropic"
-    if os.getenv("OPENROUTER_API_KEY"):
+    if os.getenv("OPENROUTER_API_KEY") and "openrouter" not in _PROVIDER_DISABLED:
         return "openrouter"
-    if os.getenv("OPENAI_API_KEY"):
+    if os.getenv("OPENAI_API_KEY") and "openai" not in _PROVIDER_DISABLED:
         return "openai"
     return None
 
@@ -119,14 +120,19 @@ def _call(
                 json={
                     "model": model,
                     "max_tokens": max_tokens,
+                    "temperature": 0,
                     "messages": [{"role": "user", "content": prompt}],
                 },
-                timeout=30,
+                timeout=15,
             )
             r.raise_for_status()
-            text = r.json()["choices"][0]["message"]["content"].strip()
+            data = r.json()
+            text = data["choices"][0]["message"]["content"].strip()
             total_ms = max(1, int((time.perf_counter() - _t0) * 1000))
-            return text, total_ms, total_ms, 0, 0, model
+            usage = data.get("usage", {})
+            in_tok = usage.get("prompt_tokens", 0)
+            out_tok = usage.get("completion_tokens", 0)
+            return text, total_ms, total_ms, in_tok, out_tok, model
 
         if p == "openai":
             import openai
@@ -142,7 +148,18 @@ def _call(
             return text, total_ms, total_ms, 0, 0, model
 
     except Exception as e:
-        print(f"  LLM error ({p}): {e}")
+        err_str = str(e)
+        # Detect permanent errors (spending limit, auth) → disable provider for session
+        if "usage limits" in err_str or "API key" in err_str or "authentication" in err_str.lower():
+            _PROVIDER_DISABLED.add(p)
+            print(f"  LLM provider '{p}' disabled for session: {err_str[:100]}")
+            # Try next provider immediately
+            next_p = _provider()
+            if next_p and next_p != p:
+                print(f"  Falling back to provider: {next_p}")
+                return _call(prompt, max_tokens, use_strong_model, _t0)
+        else:
+            print(f"  LLM error ({p}): {e}")
 
     total_ms = max(1, int((time.perf_counter() - _t0) * 1000))
     return None, total_ms, total_ms, 0, 0, "unknown"
