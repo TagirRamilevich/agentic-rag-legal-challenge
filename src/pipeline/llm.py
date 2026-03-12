@@ -1011,9 +1011,22 @@ def answer_with_llm(
                 if (cp["doc_id"], cp["page_number"]) not in _existing:
                     used_pages.append(cp)
                     break
+        # Adjacent page expansion: articles/clauses often span pages.
+        # Adding adjacent pages from the same doc improves recall at low cost.
+        _ft_existing = {(p["doc_id"], p["page_number"]) for p in used_pages}
+        _ft_adj_needed = set()
+        for p in list(used_pages):
+            for delta in (-1, 1):
+                ak = (p["doc_id"], p["page_number"] + delta)
+                if ak not in _ft_existing and ak[1] >= 1:
+                    _ft_adj_needed.add(ak)
+        for ap in context_pages:
+            ak = (ap["doc_id"], ap["page_number"])
+            if ak in _ft_adj_needed and ak not in _ft_existing:
+                used_pages.append(ap)
+                _ft_existing.add(ak)
         # Cap free_text pages: β=2.5 rewards recall heavily, so allow more pages.
-        # Missing gold page costs 6.25x more than extra page.
-        _ft_cap = 4 if is_comparison else 3
+        _ft_cap = 5 if is_comparison else 4
         if len(used_pages) > _ft_cap:
             used_pages = used_pages[:_ft_cap]
         total_ms2 = max(1, int((time.perf_counter() - _t0) * 1000))
@@ -1363,6 +1376,24 @@ def answer_with_llm(
                     if _vk not in {(p["doc_id"], p["page_number"]) for p in source_pages}:
                         source_pages.insert(0, _verified_subclause_page)
 
+    # Adjacent page expansion for extractive types: articles/clauses span pages.
+    # β=2.5 means missing a page costs 3.8x more than an extra page.
+    # Only expand from pages in retrieved pool (not random pages).
+    if not is_comparison and source_pages and answer_type in ("bool", "boolean", "number", "date", "name"):
+        _exp_existing = {(p["doc_id"], p["page_number"]) for p in source_pages}
+        _exp_adj = set()
+        for p in source_pages:
+            for delta in (-1, 1):
+                ak = (p["doc_id"], p["page_number"] + delta)
+                if ak not in _exp_existing and ak[1] >= 1:
+                    _exp_adj.add(ak)
+        _search_pool_exp = _all_pages if _all_pages else context_pages
+        for ap in _search_pool_exp:
+            ak = (ap["doc_id"], ap["page_number"])
+            if ak in _exp_adj and ak not in _exp_existing:
+                source_pages.append(ap)
+                _exp_existing.add(ak)
+
     # Final page cap: tighter for non-comparison (single-doc questions) where
     # gold is typically 1-2 pages, looser for comparison (multi-doc).
     if is_comparison:
@@ -1372,8 +1403,8 @@ def answer_with_llm(
         }
     else:
         _MAX_CITED = {
-            "bool": 2, "boolean": 2, "number": 2, "date": 2,
-            "name": 2, "names": 2, "free_text": 3,
+            "bool": 3, "boolean": 3, "number": 3, "date": 3,
+            "name": 3, "names": 3, "free_text": 4,
         }
     _cap = _MAX_CITED.get(answer_type, 3)
     if len(source_pages) > _cap:
