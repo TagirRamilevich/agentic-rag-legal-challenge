@@ -586,7 +586,7 @@ def retrieve_pages(
     # Tag with _priority to prevent cross-encoder from pushing them out.
     _is_metadata_q = bool(re.search(
         r"\b(what is the (?:law )?number|what is the title|official (?:law )?number|"
-        r"enacted\b|commencement date|date (?:of|was) .{0,20}enacted|cover page|"
+        r"enacted\b|commencement date|date (?:of|was) .{0,20}enacted|cover page|title page|first page|"
         r"latest.{0,20}(?:law|amend)|(?:law|amend).{0,20}latest|amended by)\b",
         question, re.IGNORECASE,
     ))
