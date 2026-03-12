@@ -160,7 +160,10 @@ _TYPE_INSTRUCTIONS = {
         "IMPORTANT: The answer is the VALUE stated in the article text, NOT the article number itself. "
         "For example, if Article 19(4) says 'within six (6) months', the answer is 6, NOT 19. "
         "Look for the specific quantity, duration, amount, or count mentioned in the text. "
-        "Numbers in parentheses like (5,000) mean negative: -5000. "
+        "Word-numbers: 'one'=1, 'two'=2, 'three'=3, 'four'=4, 'five'=5, 'six'=6, 'seven'=7, "
+        "'eight'=8, 'nine'=9, 'ten'=10, 'twelve'=12, 'fifteen'=15, 'twenty'=20, 'thirty'=30, 'sixty'=60, 'ninety'=90. "
+        "For 'what is the law number' questions: return just the number (e.g., Law No. 3 of 2004 → 3). "
+        "Accounting parentheses like (5,000) mean negative: -5000. "
         "Convert thousands/millions: '1.5 million' → 1500000. "
         "If multiple numbers appear, choose the one that directly answers the question. "
         "Examples: 1500000 or 3.5 or 42 or -5000. "
@@ -168,8 +171,10 @@ _TYPE_INSTRUCTIONS = {
     ),
     "bool": (
         "Return ONLY the word true, false, or null (lowercase, nothing else). "
-        "true = yes / same / granted / approved / allowed / upheld / confirmed. "
-        "false = no / different / dismissed / denied / rejected / refused. "
+        "true = yes / the text confirms / same / granted / approved / allowed / upheld / confirmed / can / does / is. "
+        "false = no / the text denies / different / dismissed / denied / rejected / refused / cannot / does not / is not / shall not. "
+        "Read the specific article or section mentioned in the question. "
+        "For 'does X apply' or 'can X do Y' questions: look for what the article actually states. "
         "For comparison questions (e.g. 'same judge', 'same year', 'same party'): "
         "compare the specific facts from each document block carefully. "
         "If the two values clearly differ, return false. "
@@ -178,8 +183,10 @@ _TYPE_INSTRUCTIONS = {
     ),
     "boolean": (
         "Return ONLY the word true, false, or null (lowercase, nothing else). "
-        "true = yes / same / granted / approved / allowed / upheld / confirmed. "
-        "false = no / different / dismissed / denied / rejected / refused. "
+        "true = yes / the text confirms / same / granted / approved / allowed / upheld / confirmed / can / does / is. "
+        "false = no / the text denies / different / dismissed / denied / rejected / refused / cannot / does not / is not / shall not. "
+        "Read the specific article or section mentioned in the question. "
+        "For 'does X apply' or 'can X do Y' questions: look for what the article actually states. "
         "For comparison questions (e.g. 'same judge', 'same year', 'same party'): "
         "compare the specific facts from each document block carefully. "
         "If the two values clearly differ, return false. "
@@ -195,6 +202,7 @@ _TYPE_INSTRUCTIONS = {
         "Return ONLY the name or entity as a short phrase. "
         "Include the full legal name if available. "
         "For 'which case' questions: return the case number (e.g. 'CFI 010/2024'). "
+        "For 'which case was decided/issued earlier' questions: find the decision/issue date in each case document, compare the dates, and return the case number with the earlier date. "
         "For 'which party had higher/lower' questions: compare the values and return the correct one. "
         "No explanation, no extra text. "
         "If not found in context: null" + _CITE_SUFFIX
@@ -205,6 +213,8 @@ _TYPE_INSTRUCTIONS = {
         "No markdown code blocks. No explanations. "
         "Include every relevant person, company, or entity that answers the question. "
         "Use the EXACT names as they appear in the documents. "
+        "For party/claimant/defendant questions: look in the BETWEEN section or case header for party names. "
+        "Do NOT include judge names, court names, or procedural terms — only the actual parties. "
         "If genuinely not found: null" + _CITE_SUFFIX
     ),
     "free_text": (
@@ -212,6 +222,10 @@ _TYPE_INSTRUCTIONS = {
         f"Maximum {FREE_TEXT_MAX} characters. Be concise but complete. "
         "Include specific details: legal names, article/section numbers, dates, amounts. "
         "Do NOT speculate or provide general legal knowledge beyond what is stated. "
+        "IMPORTANT: These are DIFC (Dubai International Financial Centre) court documents. "
+        "DIFC courts do NOT have juries, plea bargains, or criminal proceedings. "
+        "If the question asks about concepts that don't exist in DIFC courts (jury, plea bargain, verdict), "
+        f"write EXACTLY: {FREE_TEXT_FALLBACK}\n"
         "Look carefully through ALL context blocks for relevant information before concluding it is absent. "
         "After your answer write exactly: SOURCES: then comma-separated 0-based "
         "block numbers you used (e.g. SOURCES: 0,2). "
@@ -236,8 +250,10 @@ def _distill_page(text: str, question: str, max_chars: int) -> str:
     # Check for specific article reference to boost matching paragraphs
     _art_m = re.search(r"Article\s+(\d+)", question, re.IGNORECASE)
     art_num = _art_m.group(1) if _art_m else None
+    # Detect case/party questions to preserve header sections
+    _is_party_q = bool(re.search(r"\b(claimant|defendant|respondent|party|parties|judge|issued|date of issue)\b", question, re.IGNORECASE))
     scored = []
-    for para in paragraphs:
+    for i, para in enumerate(paragraphs):
         para = para.strip()
         if not para:
             continue
@@ -246,6 +262,13 @@ def _distill_page(text: str, question: str, max_chars: int) -> str:
         # Bonus for paragraphs containing the specific article number
         if art_num and re.search(rf"\b{art_num}\b", para):
             score += 3
+        # Bonus for case header sections (BETWEEN, parties, judge, date)
+        if _is_party_q:
+            if re.search(r"\bBETWEEN\b|Claimant|Defendant|Respondent|UPON|Date of Issue|BEFORE", para):
+                score += 5
+        # Always keep first paragraph (often has title/header info)
+        if i == 0:
+            score += 1
         scored.append((score, para))
 
     # Sort by relevance, take top paragraphs fitting max_chars
@@ -460,6 +483,18 @@ def _find_source_pages(answer: Any, pages: list[dict], answer_type: str = "") ->
         # free_text sources are resolved from LLM citation in answer_with_llm
         return pages[:2]
 
+    if answer_type == "names" and isinstance(answer, list):
+        # For names: find pages containing the most named entities
+        page_scores = []
+        for page in pages:
+            text_lower = page["text"].lower()
+            matches = sum(1 for name in answer if name.lower() in text_lower)
+            page_scores.append((matches, page))
+        page_scores.sort(key=lambda x: -x[0])
+        # Return pages with at least one name match
+        matched = [p for score, p in page_scores if score > 0]
+        return matched[:3] if matched else pages[:1]
+
     # Build search terms
     search_terms: list[str] = []
     if answer_type == "number":
@@ -524,6 +559,9 @@ def answer_with_llm(
 
     # For comparison questions: ensure pages from multiple docs are included
     # (otherwise all max_pages slots may be filled by one doc)
+    # Also bump max_pages for comparison name questions (need dates from both cases)
+    if is_comparison and answer_type == "name":
+        max_pages = max(max_pages, 5)
     if is_comparison and len(pages) > max_pages:
         selected: list[dict] = []
         doc_counts: dict[str, int] = {}

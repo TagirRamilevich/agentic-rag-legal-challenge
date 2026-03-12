@@ -102,6 +102,8 @@ _COMPARISON_RE = re.compile(
     r"common to both|"
     r"any of the same|"
     r"in both cases?|"
+    r"issued (first|earlier)|"
+    r"earlier issue date|earlier date of issue|"
     r"which (case|document|party|judgment) (has|had|is|was|were) (the )?(earlier|later|higher|lower|greater|smaller|first|last|same)|"
     r"(between|comparing) .{3,60} (and|or|vs\.?|versus))\b",
     re.IGNORECASE,
@@ -634,6 +636,25 @@ def retrieve_pages(
                 result[j] = tagged
                 if j not in top_indices:
                     top_indices.append(j)
+
+    # "Date of Issue" / "issued earlier" questions: ensure p.1 of each referenced case
+    # is included with _priority (issue dates are on the first page of case docs).
+    _is_date_of_issue_q = bool(re.search(
+        r"\b(date of issue|issued earlier|earlier issue date|earlier date of issue)\b",
+        question, re.IGNORECASE,
+    ))
+    if _is_date_of_issue_q and case_refs:
+        for case_ref in case_refs[:2]:
+            for idx, p in enumerate(pages):
+                if p["page_number"] == 1 and case_ref.replace(" ", "") in p["text"].replace(" ", ""):
+                    if idx not in result or not result.get(idx, {}).get("_priority"):
+                        tagged = dict(pages[idx])
+                        tagged["_priority"] = True
+                        priority.append(idx)
+                        result[idx] = tagged
+                        if idx not in top_indices:
+                            top_indices.append(idx)
+                    break
 
     # "Same law number" / definition questions: pin pages that define "Law" with
     # a law number (e.g. '"Law" means the Strata Title Law DIFC Law No. 5 of 2007').
