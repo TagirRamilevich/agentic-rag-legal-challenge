@@ -946,6 +946,21 @@ def answer_with_llm(
                             added.add(key)
             source_pages.extend(extra)
 
+    # Article-reference filter for boolean: if question mentions "Article N",
+    # prefer pages that actually contain that article reference.
+    # This improves precision by removing irrelevant expanded pages.
+    if answer_type in ("bool", "boolean") and not is_comparison and len(source_pages) > 1:
+        _q_art_m = re.search(r"\bArticle\s+(\d+)", question, re.IGNORECASE)
+        if _q_art_m:
+            _art_n = _q_art_m.group(1)
+            _art_filter_pat = re.compile(
+                rf"(?:\bArticle\s+{_art_n}\b|\b{_art_n}\s*\()", re.IGNORECASE
+            )
+            _art_pages = [p for p in source_pages if _art_filter_pat.search(p.get("text", ""))]
+            # Only apply filter if we found at least 1 page with the article
+            if _art_pages:
+                source_pages = _art_pages
+
     # Final page cap: tighter for non-comparison (single-doc questions) where
     # gold is typically 1-2 pages, looser for comparison (multi-doc).
     if is_comparison:
