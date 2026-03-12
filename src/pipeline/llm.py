@@ -1312,10 +1312,10 @@ def answer_with_llm(
         # and evidence matching, the risk is low. Precision gain outweighs recall risk.
         pass
 
-    # Comparison optimization: restrict to 1 page per CASE (not per doc).
-    # Gold expects 1 page per case. Cases with multiple docs (e.g. DEC 001/2025
-    # has 2 docs) would otherwise cite 3+ pages. Grouping by case: G 0.936→1.0.
-    if is_comparison and answer_type in ("bool", "boolean", "name") and len(source_pages) > 1:
+    # Comparison optimization: keep up to 2 pages per CASE (not per doc).
+    # β=2.5 means missing a page costs 3.8x more than extra. Allow 2 per case
+    # to capture both header (page 1) and content pages.
+    if is_comparison and answer_type in ("bool", "boolean", "name") and len(source_pages) > 2:
         # Map each doc_id to its case reference
         _case_refs_in_q = re.findall(r"[A-Z]{2,5}\s+\d{3}/\d{4}", question)
         _doc_to_case: dict[str, str] = {}
@@ -1325,22 +1325,27 @@ def answer_with_llm(
                 if cr.replace(" ", "") in p_text.replace(" ", ""):
                     _doc_to_case[p["doc_id"]] = cr
                     break
-        # Group by case and keep lowest page from each case
+        # Group by case and keep up to 2 pages per case (sorted by page number)
         if _doc_to_case:
-            _best_per_case: dict[str, dict] = {}
+            _pages_per_case: dict[str, list] = {}
             for p in source_pages:
-                case = _doc_to_case.get(p["doc_id"], p["doc_id"])  # fallback to doc_id
-                if case not in _best_per_case or p["page_number"] < _best_per_case[case]["page_number"]:
-                    _best_per_case[case] = p
-            source_pages = list(_best_per_case.values())
+                case = _doc_to_case.get(p["doc_id"], p["doc_id"])
+                _pages_per_case.setdefault(case, []).append(p)
+            _kept = []
+            for case, case_pages in _pages_per_case.items():
+                case_pages.sort(key=lambda x: x["page_number"])
+                _kept.extend(case_pages[:2])
+            source_pages = _kept
         else:
-            # Fallback: 1 page per doc
-            _best_per_doc: dict[str, dict] = {}
+            # Fallback: 2 pages per doc
+            _pages_per_doc: dict[str, list] = {}
             for p in source_pages:
-                did = p["doc_id"]
-                if did not in _best_per_doc or p["page_number"] < _best_per_doc[did]["page_number"]:
-                    _best_per_doc[did] = p
-            source_pages = list(_best_per_doc.values())
+                _pages_per_doc.setdefault(p["doc_id"], []).append(p)
+            _kept = []
+            for did, doc_pages in _pages_per_doc.items():
+                doc_pages.sort(key=lambda x: x["page_number"])
+                _kept.extend(doc_pages[:2])
+            source_pages = _kept
 
     # Article-reference filter: if question mentions "Article N",
     # prefer pages that actually contain that article reference.
