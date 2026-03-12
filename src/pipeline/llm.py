@@ -821,7 +821,7 @@ def answer_with_llm(
         # Use cited pages if valid; fallback to ALL context pages (β=2.5 rewards recall)
         if ft_indices:
             used_pages = [context_pages[i] for i in ft_indices]
-            # Add ±2 adjacent pages for recall boost (β=2.5 rewards recall heavily)
+            # Add ±1 adjacent pages for recall (balanced with precision)
             added_ft: set[tuple[str, int]] = {(p["doc_id"], p["page_number"]) for p in used_pages}
             extra_ft: list[dict] = []
             for src in list(used_pages):
@@ -829,7 +829,7 @@ def answer_with_llm(
                     key_ft = (cp["doc_id"], cp["page_number"])
                     if key_ft not in added_ft and cp["doc_id"] == src["doc_id"]:
                         delta = abs(cp["page_number"] - src["page_number"])
-                        if delta <= 2:
+                        if delta <= 1:
                             extra_ft.append(cp)
                             added_ft.add(key_ft)
             used_pages.extend(extra_ft)
@@ -947,16 +947,20 @@ def answer_with_llm(
                             added.add(key)
             source_pages.extend(extra)
 
-    # Final page cap to prevent precision loss from over-citation.
-    # β=2.5 is recall-heavy, but citing 8+ pages is almost always wrong.
-    _MAX_CITED = {
-        "bool": 4, "boolean": 4, "number": 3, "date": 3,
-        "name": 4, "names": 3, "free_text": 5,
-    }
-    _cap = _MAX_CITED.get(answer_type, 4)
+    # Final page cap: tighter for non-comparison (single-doc questions) where
+    # gold is typically 1-2 pages, looser for comparison (multi-doc).
+    if is_comparison:
+        _MAX_CITED = {
+            "bool": 4, "boolean": 4, "number": 3, "date": 3,
+            "name": 4, "names": 3, "free_text": 5,
+        }
+    else:
+        _MAX_CITED = {
+            "bool": 2, "boolean": 2, "number": 2, "date": 2,
+            "name": 2, "names": 3, "free_text": 4,
+        }
+    _cap = _MAX_CITED.get(answer_type, 3)
     if len(source_pages) > _cap:
-        # Keep pages with highest relevance: prefer pages cited by LLM,
-        # then evidence-verified, then expanded.
         source_pages = source_pages[:_cap]
 
     return answer, source_pages, ttft_ms, total_ms_final, in_tok, out_tok, model
