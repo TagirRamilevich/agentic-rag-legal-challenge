@@ -20,8 +20,8 @@ _TYPE_CONFIG = {
     "number":   {"max_pages": 3, "chars": 1000, "max_tokens": 30},
     "date":     {"max_pages": 3, "chars": 1000, "max_tokens": 30},
     "name":     {"max_pages": 4, "chars": 1200, "max_tokens": 60},
-    "names":    {"max_pages": 4, "chars": 1500, "max_tokens": 160},
-    "free_text":{"max_pages": 4, "chars": 1800, "max_tokens": 350},
+    "names":    {"max_pages": 3, "chars": 1500, "max_tokens": 160},
+    "free_text":{"max_pages": 3, "chars": 1800, "max_tokens": 350},
 }
 _DEFAULT_CONFIG = {"max_pages": 3, "chars": 1200, "max_tokens": 256}
 
