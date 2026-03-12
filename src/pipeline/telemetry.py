@@ -24,10 +24,15 @@ def build_telemetry(
         for doc_id, pns in sorted(by_doc.items())
     ]
 
+    # Compute tpot_ms: (total_time - ttft) / output_tokens if streaming
+    tpot_ms = 0
+    if output_tokens > 0 and total_ms > ttft_ms:
+        tpot_ms = max(1, (total_ms - ttft_ms) // max(1, output_tokens))
+
     return {
         "timing": {
             "ttft_ms": max(1, ttft_ms),
-            "tpot_ms": 0,
+            "tpot_ms": tpot_ms,
             "total_time_ms": max(1, total_ms),
         },
         "retrieval": {"retrieved_chunk_pages": retrieved_chunk_pages},
