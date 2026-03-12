@@ -252,6 +252,7 @@ def _distill_page(text: str, question: str, max_chars: int) -> str:
     art_num = _art_m.group(1) if _art_m else None
     # Detect case/party questions to preserve header sections
     _is_party_q = bool(re.search(r"\b(claimant|defendant|respondent|party|parties|judge|issued|date of issue)\b", question, re.IGNORECASE))
+    _is_outcome_q = bool(re.search(r"\b(result|outcome|ruling|ordered|decision|decided|concluded)\b", question, re.IGNORECASE))
     scored = []
     for i, para in enumerate(paragraphs):
         para = para.strip()
@@ -265,6 +266,10 @@ def _distill_page(text: str, question: str, max_chars: int) -> str:
         # Bonus for case header sections (BETWEEN, parties, judge, date)
         if _is_party_q:
             if re.search(r"\bBETWEEN\b|Claimant|Defendant|Respondent|UPON|Date of Issue|BEFORE", para):
+                score += 5
+        # Bonus for court order/ruling sections
+        if _is_outcome_q:
+            if re.search(r"ORDERED|ORDER|JUDGMENT|RULING|CONCLUSION|DECISION|DISMISSED|GRANTED", para, re.IGNORECASE):
                 score += 5
         # Always keep first paragraph (often has title/header info)
         if i == 0:

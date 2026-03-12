@@ -792,6 +792,64 @@ def retrieve_pages(
                         if idx2 not in top_indices:
                             top_indices.append(idx2)
 
+    # "Last page" questions: pin the last page of the specified case document.
+    if re.search(r"\blast page\b", question, re.IGNORECASE) and case_refs:
+        for case_ref in case_refs[:1]:
+            for idx, p in enumerate(pages):
+                if p["page_number"] == 1 and case_ref.replace(" ", "") in p["text"].replace(" ", ""):
+                    case_doc_id = p["doc_id"]
+                    # Find the last page of this document
+                    max_pg = max(pp["page_number"] for pp in pages if pp["doc_id"] == case_doc_id)
+                    last_j = doc_page_index.get((case_doc_id, max_pg))
+                    if last_j is not None:
+                        tagged = dict(pages[last_j])
+                        tagged["_priority"] = True
+                        priority.append(last_j)
+                        result[last_j] = tagged
+                        if last_j not in top_indices:
+                            top_indices.append(last_j)
+                    break
+
+    # "Second page" / specific page questions: pin the specified page.
+    _page_n_m = re.search(r"\b(?:second|2nd) page\b", question, re.IGNORECASE)
+    if _page_n_m and case_refs:
+        target_pg = 2
+        for case_ref in case_refs[:1]:
+            for idx, p in enumerate(pages):
+                if p["page_number"] == 1 and case_ref.replace(" ", "") in p["text"].replace(" ", ""):
+                    j = doc_page_index.get((p["doc_id"], target_pg))
+                    if j is not None:
+                        tagged = dict(pages[j])
+                        tagged["_priority"] = True
+                        priority.append(j)
+                        result[j] = tagged
+                        if j not in top_indices:
+                            top_indices.append(j)
+                    break
+
+    # Case outcome/order questions: pin pages containing "IT IS HEREBY ORDERED"
+    # or "CONCLUSION" sections (the actual decision is often on the last 1-2 pages).
+    if re.search(r"\b(result|outcome|ordered|ruling|decision|concluded|order.{0,15}section)\b", question, re.IGNORECASE) and case_refs:
+        _order_pat = re.compile(
+            r"IT IS HEREBY ORDERED|ORDERED THAT|CONCLUSION|RULING|THE COURT ORDERS|DECISION",
+            re.IGNORECASE,
+        )
+        for case_ref in case_refs[:1]:  # Only for the primary case
+            for idx2, p2 in enumerate(pages):
+                if p2["page_number"] == 1 and case_ref.replace(" ", "") in p2["text"].replace(" ", ""):
+                    case_doc_id = p2["doc_id"]
+                    # Find order pages in this doc
+                    for idx3, p3 in enumerate(pages):
+                        if p3["doc_id"] == case_doc_id and _order_pat.search(p3["text"]):
+                            if idx3 not in result or not result.get(idx3, {}).get("_priority"):
+                                tagged3 = dict(pages[idx3])
+                                tagged3["_priority"] = True
+                                priority.append(idx3)
+                                result[idx3] = tagged3
+                                if idx3 not in top_indices:
+                                    top_indices.append(idx3)
+                    break
+
     # Cross-document search: for "which laws were amended by X" questions,
     # find all docs whose title page (p.1) mentions the amending law.
     _amend_q = re.search(
