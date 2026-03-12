@@ -365,7 +365,16 @@ def _parse(raw: str, answer_type: str) -> Any:
         return None  # ambiguous → null
 
     if answer_type == "number":
-        return parse_number(raw)
+        # Strip word-number forms: "six (6)" → "6", "twelve (12)" → "12"
+        _word_num = re.search(r"\b\w+\s+\((\d+)\)", raw)
+        if _word_num:
+            raw = _word_num.group(1)
+        val = parse_number(raw)
+        # LLM should return non-negative for counts/durations; only allow
+        # negative if the raw text explicitly has a minus sign
+        if val is not None and val < 0 and "-" not in raw:
+            val = -val
+        return val
 
     if answer_type == "date":
         m = re.search(r"\d{4}-\d{2}-\d{2}", raw)
