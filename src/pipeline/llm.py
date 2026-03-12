@@ -182,7 +182,7 @@ def _call(
 # Citation suffix appended to all type instructions
 _CITE_SUFFIX = (
     " End with CITE: followed by the 0-based block number(s) you used "
-    "(e.g. CITE:0 or CITE:0,2). Cite ONLY blocks containing evidence for your answer."
+    "(e.g. CITE:0 or CITE:0,2). Cite ALL blocks that contain information relevant to your answer."
 )
 
 _TYPE_INSTRUCTIONS = {
