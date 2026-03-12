@@ -1379,7 +1379,7 @@ def answer_with_llm(
     # Adjacent page expansion for extractive types: articles/clauses span pages.
     # β=2.5 means missing a page costs 3.8x more than an extra page.
     # Only expand from pages in retrieved pool (not random pages).
-    if not is_comparison and source_pages and answer_type in ("bool", "boolean", "number", "date", "name"):
+    if not is_comparison and source_pages and answer_type in ("bool", "boolean", "number", "date", "name", "names"):
         _exp_existing = {(p["doc_id"], p["page_number"]) for p in source_pages}
         _exp_adj = set()
         for p in source_pages:
