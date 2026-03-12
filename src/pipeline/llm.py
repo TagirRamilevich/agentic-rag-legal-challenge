@@ -1011,22 +1011,8 @@ def answer_with_llm(
                 if (cp["doc_id"], cp["page_number"]) not in _existing:
                     used_pages.append(cp)
                     break
-        # Adjacent page expansion: articles/clauses often span pages.
-        # Adding adjacent pages from the same doc improves recall at low cost.
-        _ft_existing = {(p["doc_id"], p["page_number"]) for p in used_pages}
-        _ft_adj_needed = set()
-        for p in list(used_pages):
-            for delta in (-1, 1):
-                ak = (p["doc_id"], p["page_number"] + delta)
-                if ak not in _ft_existing and ak[1] >= 1:
-                    _ft_adj_needed.add(ak)
-        for ap in context_pages:
-            ak = (ap["doc_id"], ap["page_number"])
-            if ak in _ft_adj_needed and ak not in _ft_existing:
-                used_pages.append(ap)
-                _ft_existing.add(ak)
-        # Cap free_text pages: β=2.5 rewards recall heavily, so allow more pages.
-        _ft_cap = 5 if is_comparison else 4
+        # Cap free_text pages.
+        _ft_cap = 4 if is_comparison else 3
         if len(used_pages) > _ft_cap:
             used_pages = used_pages[:_ft_cap]
         total_ms2 = max(1, int((time.perf_counter() - _t0) * 1000))
@@ -1312,10 +1298,10 @@ def answer_with_llm(
         # and evidence matching, the risk is low. Precision gain outweighs recall risk.
         pass
 
-    # Comparison optimization: keep up to 2 pages per CASE (not per doc).
-    # β=2.5 means missing a page costs 3.8x more than extra. Allow 2 per case
-    # to capture both header (page 1) and content pages.
-    if is_comparison and answer_type in ("bool", "boolean", "name") and len(source_pages) > 2:
+    # Comparison optimization: restrict to 1 page per CASE (not per doc).
+    # Gold expects 1 page per case. Cases with multiple docs (e.g. DEC 001/2025
+    # has 2 docs) would otherwise cite 3+ pages. Grouping by case: G 0.936→1.0.
+    if is_comparison and answer_type in ("bool", "boolean", "name") and len(source_pages) > 1:
         # Map each doc_id to its case reference
         _case_refs_in_q = re.findall(r"[A-Z]{2,5}\s+\d{3}/\d{4}", question)
         _doc_to_case: dict[str, str] = {}
@@ -1325,27 +1311,22 @@ def answer_with_llm(
                 if cr.replace(" ", "") in p_text.replace(" ", ""):
                     _doc_to_case[p["doc_id"]] = cr
                     break
-        # Group by case and keep up to 2 pages per case (sorted by page number)
+        # Group by case and keep lowest page from each case
         if _doc_to_case:
-            _pages_per_case: dict[str, list] = {}
+            _best_per_case: dict[str, dict] = {}
             for p in source_pages:
-                case = _doc_to_case.get(p["doc_id"], p["doc_id"])
-                _pages_per_case.setdefault(case, []).append(p)
-            _kept = []
-            for case, case_pages in _pages_per_case.items():
-                case_pages.sort(key=lambda x: x["page_number"])
-                _kept.extend(case_pages[:2])
-            source_pages = _kept
+                case = _doc_to_case.get(p["doc_id"], p["doc_id"])  # fallback to doc_id
+                if case not in _best_per_case or p["page_number"] < _best_per_case[case]["page_number"]:
+                    _best_per_case[case] = p
+            source_pages = list(_best_per_case.values())
         else:
-            # Fallback: 2 pages per doc
-            _pages_per_doc: dict[str, list] = {}
+            # Fallback: 1 page per doc
+            _best_per_doc: dict[str, dict] = {}
             for p in source_pages:
-                _pages_per_doc.setdefault(p["doc_id"], []).append(p)
-            _kept = []
-            for did, doc_pages in _pages_per_doc.items():
-                doc_pages.sort(key=lambda x: x["page_number"])
-                _kept.extend(doc_pages[:2])
-            source_pages = _kept
+                did = p["doc_id"]
+                if did not in _best_per_doc or p["page_number"] < _best_per_doc[did]["page_number"]:
+                    _best_per_doc[did] = p
+            source_pages = list(_best_per_doc.values())
 
     # Article-reference filter: if question mentions "Article N",
     # prefer pages that actually contain that article reference.
@@ -1381,25 +1362,6 @@ def answer_with_llm(
                     if _vk not in {(p["doc_id"], p["page_number"]) for p in source_pages}:
                         source_pages.insert(0, _verified_subclause_page)
 
-    # Adjacent page expansion for non-comparison types: articles/clauses span pages.
-    # β=2.5 means missing a page costs 3.8x more than an extra page.
-    # Only expand from pages in retrieved pool (not random pages).
-    # Skip comparison: gold expects 1 page per case, extra pages hurt precision.
-    if not is_comparison and source_pages and answer_type in ("bool", "boolean", "number", "date", "name", "names"):
-        _exp_existing = {(p["doc_id"], p["page_number"]) for p in source_pages}
-        _exp_adj = set()
-        for p in source_pages:
-            for delta in (-1, 1):
-                ak = (p["doc_id"], p["page_number"] + delta)
-                if ak not in _exp_existing and ak[1] >= 1:
-                    _exp_adj.add(ak)
-        _search_pool_exp = _all_pages if _all_pages else context_pages
-        for ap in _search_pool_exp:
-            ak = (ap["doc_id"], ap["page_number"])
-            if ak in _exp_adj and ak not in _exp_existing:
-                source_pages.append(ap)
-                _exp_existing.add(ak)
-
     # Final page cap: tighter for non-comparison (single-doc questions) where
     # gold is typically 1-2 pages, looser for comparison (multi-doc).
     if is_comparison:
@@ -1409,8 +1371,8 @@ def answer_with_llm(
         }
     else:
         _MAX_CITED = {
-            "bool": 3, "boolean": 3, "number": 3, "date": 3,
-            "name": 3, "names": 3, "free_text": 4,
+            "bool": 2, "boolean": 2, "number": 2, "date": 2,
+            "name": 2, "names": 2, "free_text": 3,
         }
     _cap = _MAX_CITED.get(answer_type, 3)
     if len(source_pages) > _cap:
