@@ -1,3 +1,5 @@
+import re
+
 from src.pipeline.index import tokenize
 
 _SYNONYMS: dict[str, list[str]] = {
@@ -59,7 +61,8 @@ _SYNONYMS: dict[str, list[str]] = {
 }
 
 
-def expand_query(tokens: list[str], max_per_token: int = 3) -> list[str]:
+def expand_query(tokens: list[str], max_per_token: int = 3,
+                 original_query: str = "", answer_type: str = "") -> list[str]:
     expanded = list(tokens)
     seen = set(tokens)
     for token in tokens:
@@ -67,4 +70,32 @@ def expand_query(tokens: list[str], max_per_token: int = 3) -> list[str]:
             if syn not in seen:
                 expanded.append(syn)
                 seen.add(syn)
+
+    # Article number boost: when query mentions "Article N", add the bare number
+    # as a token to boost pages containing that article (BM25 term frequency).
+    if original_query:
+        for m in re.finditer(r"\bArticle\s+(\d+)", original_query, re.IGNORECASE):
+            num = m.group(1)
+            if num not in seen:
+                expanded.append(num)
+                seen.add(num)
+        # Also boost "Section" and "Part" references
+        for m in re.finditer(r"\b(?:Section|Part)\s+(\d+)", original_query, re.IGNORECASE):
+            num = m.group(1)
+            if num not in seen:
+                expanded.append(num)
+                seen.add(num)
+
+    # Type-aware expansion: add domain terms that help BM25 find relevant pages
+    if answer_type == "date":
+        for term in ["enacted", "commencement", "force", "effective"]:
+            if term not in seen:
+                expanded.append(term)
+                seen.add(term)
+    elif answer_type in ("bool", "boolean"):
+        for term in ["shall", "must", "may", "permitted", "prohibited"]:
+            if term not in seen:
+                expanded.append(term)
+                seen.add(term)
+
     return expanded

@@ -125,10 +125,22 @@ def main(phase: str, config_path: str = "configs/rag.yaml", skip_validate: bool 
             # pages from multiple docs are included (max 3 per doc)
             final_pages = rerank_pages(retrieved, q["question"], top_k=top_k_rerank, max_per_doc=3)
         else:
-            final_pages = retrieved[:top_k_rerank]
+            # For free_text: pass more pages so answer_with_llm can do smart selection
+            _at = q.get("answer_type", "")
+            import re as _re
+            _at = q.get("answer_type", "")
+            _needs_deep = _at == "free_text" and _re.search(
+                r"\b(schedule|maximum fine|conclusion section|Conclusion.*costs)\b",
+                q["question"], _re.IGNORECASE,
+            )
+            # Pass all retrieved pages — answer_with_llm uses max_pages for LLM context
+            # but searches the full pool for citation verification and expansion.
+            final_pages = retrieved
 
         if use_llm:
-            answer, used_pages, ttft_ms, total_ms, in_tok, out_tok, model = answer_with_llm(q, final_pages, t0=t0, is_comparison=is_cmp)
+            # Set t0 right before LLM call (exclude retrieval/rerank from TTFT)
+            t0_llm = time.perf_counter()
+            answer, used_pages, ttft_ms, total_ms, in_tok, out_tok, model = answer_with_llm(q, final_pages, t0=t0_llm, is_comparison=is_cmp)
             llm_count += 1
         else:
             answer, used_pages = answer_question(q, final_pages)

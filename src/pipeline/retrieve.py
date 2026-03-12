@@ -90,8 +90,8 @@ _LAW_IDENTITY_RE = re.compile(
     re.IGNORECASE,
 )
 
-# Article reference in question → need to find that specific article page
-_ARTICLE_RE = re.compile(r"\bArticle\s+(\d+)(?:\s*\(\d+\))?\b", re.IGNORECASE)
+# Article/Section/Part reference in question → need to find that specific page
+_ARTICLE_RE = re.compile(r"\b(?:Article|Section)\s+(\d+)(?:\s*[\.(]\d+[).]?)*\b", re.IGNORECASE)
 
 # Indicators that a question compares two different documents/entities
 _COMPARISON_RE = re.compile(
@@ -158,8 +158,11 @@ def _extract_multi_entity_queries(question: str):
     return []
 
 
-def _bm25_top(bm25, pages, query_str: str, top_k: int) -> list:
-    tokens = expand_query(tokenize(query_str))
+def _bm25_top(bm25, pages, query_str: str, top_k: int,
+              original_query: str = "", answer_type: str = "") -> list:
+    tokens = expand_query(tokenize(query_str),
+                          original_query=original_query or query_str,
+                          answer_type=answer_type)
     scores = bm25.get_scores(tokens)
     ranked = sorted(range(len(scores)), key=lambda i: -scores[i])
     top_indices = [i for i in ranked[:top_k] if scores[i] > 0]
@@ -206,12 +209,15 @@ def _hybrid_top(
     embeddings,
     query_str: str,
     top_k: int,
+    original_query: str = "",
+    answer_type: str = "",
 ) -> list[int]:
     """Hybrid retrieval: BM25 + embedding search fused with RRF.
 
     Falls back to BM25-only if embeddings are None.
     """
-    bm25_indices = _bm25_top(bm25, pages, query_str, top_k * 2)
+    bm25_indices = _bm25_top(bm25, pages, query_str, top_k * 2,
+                             original_query=original_query, answer_type=answer_type)
     if embeddings is None:
         return bm25_indices[:top_k]
     emb_indices = _embedding_top(embeddings, query_str, top_k * 2)
@@ -340,7 +346,8 @@ def retrieve_pages(
             question, re.IGNORECASE,
         )
         for sq in sub_queries:
-            idxs = _hybrid_top(bm25, pages, embeddings, sq, per_q)
+            idxs = _hybrid_top(bm25, pages, embeddings, sq, per_q,
+                               original_query=question, answer_type=answer_type)
             early: list[int] = []
             if idxs:
                 top_doc_id = pages[idxs[0]]["doc_id"]
@@ -417,10 +424,12 @@ def retrieve_pages(
     # Full-question hybrid retrieval (fills remaining slots, may find cross-entity pages)
     anchors = _TYPE_ANCHORS.get(answer_type, "")
     augmented_question = f"{question} {anchors}".strip() if anchors else question
-    main_indices = _hybrid_top(bm25, pages, embeddings, augmented_question, top_k)
+    main_indices = _hybrid_top(bm25, pages, embeddings, augmented_question, top_k,
+                               original_query=question, answer_type=answer_type)
     if not main_indices:
         # Fallback: raw BM25 top-5
-        tokens = expand_query(tokenize(augmented_question))
+        tokens = expand_query(tokenize(augmented_question),
+                              original_query=question, answer_type=answer_type)
         scores = bm25.get_scores(tokens)
         ranked = sorted(range(len(scores)), key=lambda i: -scores[i])
         main_indices = ranked[: min(5, len(ranked))]
@@ -534,6 +543,42 @@ def retrieve_pages(
                         top_indices.append(next_j)
             if len(priority) >= 5:
                 break
+
+    # Multi-article support: if the question references articles from MULTIPLE laws,
+    # the main article pinning only handles the first/longest law name. Detect additional
+    # article+law pairs and pin their pages too.
+    _multi_art = re.findall(
+        r"Article\s+(\d+)(?:\s*\(\d+\)(?:\([a-z]\))?)?.*?(?:of\s+(?:the\s+)?)((?:[A-Z][a-z]+\s+){1,4}(?:Law|Regulations?))",
+        question,
+    )
+    if len(_multi_art) > 1:
+        # We already pinned for the first/primary law. Pin for additional ones.
+        _pinned_docs = {pages[idx]["doc_id"] for idx in priority} if priority else set()
+        for art_num, law_name in _multi_art:
+            law_lower = law_name.strip().lower()
+            # Find the doc for this law via routing
+            _law_doc_id = None
+            for rk, rv in doc_route.get("law", {}).items():
+                if rk.lower().startswith(law_lower[:15]) or law_lower.startswith(rk.lower()[:15]):
+                    _law_doc_id = rv
+                    break
+            if not _law_doc_id or _law_doc_id in _pinned_docs:
+                continue
+            # Search for the article page in this doc
+            _art_pat2 = re.compile(rf"(?:\bArticle\s+{art_num}\b|(?:^|\n)\s*{art_num}[.(])", re.IGNORECASE | re.MULTILINE)
+            for idx2, p in enumerate(pages):
+                if p["doc_id"] == _law_doc_id and _art_pat2.search(p["text"]):
+                    _is_toc2 = "CONTENTS" in p["text"][:300] or "TABLE OF CONTENTS" in p["text"][:300]
+                    if _is_toc2:
+                        continue
+                    tagged2 = dict(p)
+                    tagged2["_priority"] = True
+                    result[idx2] = tagged2
+                    priority.append(idx2)
+                    if idx2 not in top_indices:
+                        top_indices.append(idx2)
+                    _pinned_docs.add(_law_doc_id)
+                    break  # one page per additional law
 
     # "Administered by" questions: pin pages whose text explicitly states
     # which entity administers the law (these are often on page 4-5, not p.1).
@@ -810,10 +855,10 @@ def retrieve_pages(
                             top_indices.append(last_j)
                     break
 
-    # "Second page" / specific page questions: pin the specified page.
-    _page_n_m = re.search(r"\b(?:second|2nd) page\b", question, re.IGNORECASE)
+    # Specific page reference: "page 2", "page 5", "second page"
+    _page_n_m = re.search(r"\b(?:page\s+(\d+)|(?:second|2nd) page)\b", question, re.IGNORECASE)
     if _page_n_m and case_refs:
-        target_pg = 2
+        target_pg = int(_page_n_m.group(1)) if _page_n_m.group(1) else 2
         for case_ref in case_refs[:1]:
             for idx, p in enumerate(pages):
                 if p["page_number"] == 1 and case_ref.replace(" ", "") in p["text"].replace(" ", ""):
@@ -829,7 +874,7 @@ def retrieve_pages(
 
     # Case outcome/order questions: pin pages containing "IT IS HEREBY ORDERED"
     # or "CONCLUSION" sections (the actual decision is often on the last 1-2 pages).
-    if re.search(r"\b(result|outcome|ordered|ruling|decision|concluded|order.{0,15}section)\b", question, re.IGNORECASE) and case_refs:
+    if re.search(r"\b(result|outcome|ordered|rul(?:e|ed|ing)|decision|conclud(?:e|ed|ing)|conclusion|order.{0,15}section)\b", question, re.IGNORECASE) and case_refs:
         _order_pat = re.compile(
             r"IT IS HEREBY ORDERED|ORDERED THAT|CONCLUSION|RULING|THE COURT ORDERS|DECISION",
             re.IGNORECASE,

@@ -4,10 +4,10 @@ data_dir: data
 cache_dir: .cache
 submission_path: submission.json
 code_archive_path: code_archive.zip
-architecture_summary: "BM25+embedding hybrid with RRF fusion → cross-encoder rerank(comparison only) → Claude Haiku streaming. Doc routing index maps case/law refs to doc_ids. Dual-query retrieval for comparisons with round-robin doc diversity. Article page pinning with keyword relevance. CITE-based grounding with adjacent page recall boost. CoT for comparison booleans. Context distillation preserves case headers, article content, and court order sections."
+architecture_summary: "BM25+embedding hybrid RRF fusion → cross-encoder rerank(comparison) → Claude Sonnet(free_text)/Haiku(extractive) streaming. Doc routing index maps case/law refs to doc_ids. Dual-query retrieval for comparisons with round-robin doc diversity. Article page pinning. CITE+adjacent page grounding for high recall(β=2.5). CoT for comparison booleans. Context distillation preserves case headers, articles, court orders."
 
 retrieval:
-  top_k_bm25: 15
+  top_k_bm25: 20
   top_k_rerank: 5
   neighbor_pages: true
   use_reranker: true
