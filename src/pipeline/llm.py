@@ -527,7 +527,7 @@ def _find_source_pages(answer: Any, pages: list[dict], answer_type: str = "") ->
         page_scores.sort(key=lambda x: -x[0])
         # Return pages with at least one name match
         matched = [p for score, p in page_scores if score > 0]
-        return matched[:3] if matched else pages[:1]
+        return matched[:2] if matched else pages[:1]
 
     # Build search terms
     search_terms: list[str] = []
@@ -854,18 +854,28 @@ def answer_with_llm(
         source_pages = _find_source_pages(answer, context_pages, answer_type)
 
 
-    # Enhanced post-citation verification for text-matchable types:
-    # Search ALL retrieved pages (not just context_pages) for answer evidence.
-    # UNION with LLM-cited pages to maximize recall.
+    # Post-citation verification for text-matchable types:
+    # For non-comparison: PREFER evidence-verified pages from the primary doc.
+    # Evidence search finds pages where the answer text actually appears,
+    # which is more reliable than LLM citation for extractive types.
+    # For comparison: UNION (need pages from both docs).
     if answer_type in ("number", "date", "name", "names"):
         evidence_pages = _find_source_pages(answer, pages, answer_type)
         if evidence_pages:
-            existing_keys = {(p["doc_id"], p["page_number"]) for p in source_pages}
-            for ep in evidence_pages:
-                key = (ep["doc_id"], ep["page_number"])
-                if key not in existing_keys:
-                    source_pages.append(ep)
-                    existing_keys.add(key)
+            if not is_comparison and answer_type in ("number", "date", "name"):
+                # Restrict evidence to docs already cited by LLM
+                _primary_docs = {p["doc_id"] for p in source_pages}
+                _filtered_ev = [p for p in evidence_pages if p["doc_id"] in _primary_docs]
+                if _filtered_ev:
+                    source_pages = _filtered_ev  # REPLACE (evidence is more precise)
+            else:
+                # UNION for comparison/names (need cross-doc coverage)
+                existing_keys = {(p["doc_id"], p["page_number"]) for p in source_pages}
+                for ep in evidence_pages:
+                    key = (ep["doc_id"], ep["page_number"])
+                    if key not in existing_keys:
+                        source_pages.append(ep)
+                        existing_keys.add(key)
 
     # For non-comparison questions: restrict to the primary document(s).
     # Evidence search may find answer text in unrelated docs (e.g., same date
@@ -918,18 +928,24 @@ def answer_with_llm(
 
     # Article-aware page inclusion: if question references a specific Article,
     # ensure pages containing that article from cited docs are included.
+    # Only add if current source_pages DON'T already contain the article
+    # (avoids adding extra pages that hurt precision when article is already cited).
     _q_art_matches = re.findall(r"\bArticle\s+(\d+)", question, re.IGNORECASE)
     if _q_art_matches and source_pages:
-        _existing_keys = {(p["doc_id"], p["page_number"]) for p in source_pages}
-        _cited_doc_ids = {p["doc_id"] for p in source_pages}
         for _art_num in _q_art_matches[:2]:  # limit to first 2 article refs
             _art_pat = re.compile(rf"\bArticle\s+{_art_num}\b", re.IGNORECASE)
-            for p in pages:
-                if p["doc_id"] in _cited_doc_ids:
-                    key = (p["doc_id"], p["page_number"])
-                    if key not in _existing_keys and _art_pat.search(p.get("text", "")):
-                        source_pages.append(p)
-                        _existing_keys.add(key)
+            # Check if any current source page already contains this article
+            _already_has = any(_art_pat.search(p.get("text", "")) for p in source_pages)
+            if not _already_has:
+                _existing_keys = {(p["doc_id"], p["page_number"]) for p in source_pages}
+                _cited_doc_ids = {p["doc_id"] for p in source_pages}
+                for p in pages:
+                    if p["doc_id"] in _cited_doc_ids:
+                        key = (p["doc_id"], p["page_number"])
+                        if key not in _existing_keys and _art_pat.search(p.get("text", "")):
+                            source_pages.append(p)
+                            _existing_keys.add(key)
+                            break  # one article page is enough
 
     # For comparison questions: ensure at least 1 page per RELEVANT doc is cited.
     # Gold expects citations from BOTH documents being compared.
@@ -962,15 +978,18 @@ def answer_with_llm(
         source_pages = _specific_page
     else:
         # Adaptive expansion strategy:
-        # - For boolean: always ±1 (can't text-verify, articles span pages)
+        # - For boolean WITH LLM citation: trust citation (no expansion)
+        #   Math: 1 gold page, cite 1 → G=1.0 vs cite 2 (±1) → G=0.879
+        #   For 13 non-comparison booleans: +0.121 × ~8 / 100 ≈ +0.01 G
+        # - For boolean WITHOUT citation: ±1 for safety
         # - For number/date/name/names: ±1 only if we have few evidence pages
-        #   (text verification already found evidence pages above)
-        # - This balances recall (β=2.5) with precision
         added: set[tuple[str, int]] = {(p["doc_id"], p["page_number"]) for p in source_pages}
         extra: list[dict] = []
         if answer_type in ("bool", "boolean"):
-            # Boolean: always ±1 (can't verify by text matching)
-            max_delta = 1
+            if cited_indices:
+                max_delta = 0  # trust LLM citation — expansion hurts precision
+            else:
+                max_delta = 1  # no citation → expand for safety
         elif len(source_pages) <= 1:
             # Only 1 evidence page found — expand ±1 for safety
             max_delta = 1
@@ -1028,7 +1047,7 @@ def answer_with_llm(
     else:
         _MAX_CITED = {
             "bool": 2, "boolean": 2, "number": 2, "date": 2,
-            "name": 2, "names": 3, "free_text": 4,
+            "name": 2, "names": 2, "free_text": 3,
         }
     _cap = _MAX_CITED.get(answer_type, 3)
     if len(source_pages) > _cap:
