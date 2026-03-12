@@ -411,8 +411,11 @@ def _parse(raw: str, answer_type: str) -> Any:
     if answer_type == "name":
         if _NOT_FOUND_RE.search(raw):
             return None
-        result = raw.strip("\"' ").strip()[:200]
-        return result or None
+        # Take first line only (LLM may add explanation after)
+        first_line = raw.split("\n")[0].strip().strip("\"' ").strip()
+        if not first_line:
+            first_line = raw.strip("\"' ").strip()
+        return first_line[:200] or None
 
     if answer_type == "free_text":
         text = raw[:FREE_TEXT_MAX]
