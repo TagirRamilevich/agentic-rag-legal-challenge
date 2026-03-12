@@ -673,8 +673,11 @@ def answer_with_llm(
         r"criminal sentenc|indictments?|grand jury|bail hearings?)\b",
         re.IGNORECASE,
     )
-    if answer_type == "free_text" and _ADVERSARIAL_RE.search(question):
-        return FREE_TEXT_FALLBACK, [], 1, 1, 0, 0, "adversarial-skip"
+    if _ADVERSARIAL_RE.search(question):
+        if answer_type == "free_text":
+            return FREE_TEXT_FALLBACK, [], 1, 1, 0, 0, "adversarial-skip"
+        # For deterministic types: null + empty pages (gold=null, gold_pages=[])
+        return None, [], 1, 1, 0, 0, "adversarial-skip"
 
     if _provider() is None:
         from src.pipeline.answer import answer_question
@@ -884,6 +887,14 @@ def answer_with_llm(
     total_ms_final = max(1, int((time.perf_counter() - _t0) * 1000))
 
     if answer is None:
+        # If the LLM couldn't find an answer but the question references a specific
+        # article/case that IS in the context, try deterministic extraction as fallback.
+        # This prevents false nulls on extractable questions.
+        if answer_type not in ("free_text",) and context_pages:
+            from src.pipeline.answer import answer_question
+            det_ans, det_pages = answer_question(question_data, context_pages)
+            if det_ans is not None:
+                return det_ans, det_pages, ttft_ms, total_ms_final, in_tok, out_tok, model + "-det-fallback"
         return None, [], ttft_ms, total_ms_final, in_tok, out_tok, model
 
     # Use LLM-cited pages for precise grounding; fallback to _find_source_pages
