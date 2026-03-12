@@ -21,7 +21,7 @@ _TYPE_CONFIG = {
     "date":     {"max_pages": 4, "chars": 1000, "max_tokens": 30},
     "name":     {"max_pages": 4, "chars": 1200, "max_tokens": 60},
     "names":    {"max_pages": 4, "chars": 1500, "max_tokens": 160},
-    "free_text":{"max_pages": 5, "chars": 2500, "max_tokens": 500},
+    "free_text":{"max_pages": 5, "chars": 2500, "max_tokens": 350},
 }
 _DEFAULT_CONFIG = {"max_pages": 3, "chars": 1200, "max_tokens": 256}
 
@@ -217,17 +217,16 @@ _TYPE_INSTRUCTIONS = {
         "If genuinely not found: null" + _CITE_SUFFIX
     ),
     "free_text": (
-        f"Answer in 1-2 concise sentences (under 250 characters) using ONLY facts from the context. "
-        "Start with the direct answer — no preamble like 'According to' or 'Based on'. "
-        "Include specific details: article numbers, exact names, dates, monetary amounts. "
-        "Quote key legal terms from the text when relevant. "
-        "Do NOT use markdown, bullet points, or numbered lists. "
-        "Do NOT reference block numbers or context labels in your answer. "
+        f"Answer in 1-2 concise sentences (UNDER 200 characters) using ONLY facts from the context. "
+        "IMPORTANT: Start directly with the factual answer. "
+        "NO preamble ('According to', 'The', 'Under', 'Based on'). "
+        "NO redundant quoting — state each fact once. "
+        "Include specific details: article numbers, names, dates, amounts. "
+        "Do NOT use markdown. Do NOT reference block numbers. "
         "DIFC courts do NOT have juries, plea bargains, criminal proceedings, Miranda rights, parole, or verdicts. "
         "If the question asks about concepts that don't exist in DIFC courts, "
         f"write EXACTLY: {FREE_TEXT_FALLBACK}\n"
         "After your answer write SOURCES: followed by 0-based block numbers used (e.g. SOURCES: 0,2). "
-        "Cite ALL blocks containing relevant information. "
         f"If truly absent from ALL blocks, write EXACTLY: {FREE_TEXT_FALLBACK}"
     ),
 }
