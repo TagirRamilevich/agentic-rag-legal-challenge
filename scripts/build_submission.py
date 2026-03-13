@@ -16,7 +16,7 @@ import yaml
 from src.pipeline.ingest import ingest_corpus, get_page_counts
 from src.pipeline.index import get_or_build_index
 from src.utils.chunker import chunk_pages
-from src.pipeline.retrieve import retrieve_pages, is_comparison_question
+from src.pipeline.retrieve import retrieve_pages, is_comparison_question, build_article_page_index
 from src.pipeline.rerank import rerank_pages
 from src.pipeline.llm import answer_with_llm, warmup_llm
 from src.pipeline.answer import answer_question
@@ -89,6 +89,11 @@ def main(phase: str, config_path: str = "configs/rag.yaml", skip_validate: bool 
         units = pages
 
     bm25, units, embeddings = get_or_build_index(units, index_cache)
+
+    # Build article→page index for precise grounding on article questions
+    article_index = build_article_page_index(pages)
+    _art_def_count = len(article_index.get("definitions", {}))
+    print(f"      Article index: {_art_def_count} article definitions mapped")
 
     print(f"[3/4] Loading questions from {questions_path} ...")
     with open(questions_path, encoding="utf-8") as f:
@@ -166,7 +171,7 @@ def main(phase: str, config_path: str = "configs/rag.yaml", skip_validate: bool 
         if use_llm:
             # Set t0 right before LLM call (exclude retrieval/rerank from TTFT)
             t0_llm = time.perf_counter()
-            answer, used_pages, ttft_ms, total_ms, in_tok, out_tok, model = answer_with_llm(q, final_pages, t0=t0_llm, is_comparison=is_cmp)
+            answer, used_pages, ttft_ms, total_ms, in_tok, out_tok, model = answer_with_llm(q, final_pages, t0=t0_llm, is_comparison=is_cmp, article_index=article_index, corpus_pages=pages)
             llm_count += 1
         else:
             answer, used_pages = answer_question(q, final_pages)

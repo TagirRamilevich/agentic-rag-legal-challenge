@@ -62,6 +62,82 @@ def build_doc_routing_index(pages: list[dict]) -> dict:
     _DOC_ROUTE_CACHE[key] = index
     return index
 
+# ---------------------------------------------------------------------------
+# Article → page index: maps (doc_id, article_num) → pages where article
+# heading/definition appears (not mere references)
+# ---------------------------------------------------------------------------
+_ARTICLE_INDEX_CACHE: dict = {}
+
+
+def build_article_page_index(pages: list[dict]) -> dict:
+    """Build mapping: (doc_id, article_num_str) → sorted page_numbers.
+
+    Returns dict with two sub-indices:
+      "definitions" — pages where article heading appears (start of line)
+      "all"         — pages where article is mentioned at all
+
+    Also returns a page_lookup dict for fast (doc_id, page_number) → page obj.
+    """
+    key = id(pages)
+    if key in _ARTICLE_INDEX_CACHE:
+        return _ARTICLE_INDEX_CACHE[key]
+
+    definitions: dict[tuple[str, str], set[int]] = {}
+    all_mentions: dict[tuple[str, str], set[int]] = {}
+    page_lookup: dict[tuple[str, int], dict] = {}
+
+    for p in pages:
+        doc_id = p["doc_id"]
+        text = p.get("text", "")
+        pn = p["page_number"]
+        page_lookup[(doc_id, pn)] = p
+
+        # Definition patterns: article heading at start of line
+        _def_arts: set[str] = set()
+
+        # "Article N" at start of line or paragraph
+        for m in re.finditer(r"(?:^|\n)\s*Article\s+(\d+)\b", text, re.IGNORECASE):
+            _def_arts.add(m.group(1))
+
+        # "N." section heading followed by uppercase (e.g., "14. Termination")
+        for m in re.finditer(r"(?:^|\n)\s*(\d+)\.\s+[A-Z]", text):
+            num = int(m.group(1))
+            if 1 <= num <= 200:
+                _def_arts.add(m.group(1))
+
+        # "N(" sub-clause start (e.g., "14(1) The employer shall...")
+        for m in re.finditer(r"(?:^|\n)\s*(\d+)\(", text):
+            num = int(m.group(1))
+            if 1 <= num <= 200:
+                _def_arts.add(m.group(1))
+
+        # "N\n(" — number alone on line, next line starts with sub-clause
+        # (Operating Law format: "22\n(a) has aided...")
+        for m in re.finditer(r"(?:^|\n)\s*(\d+)\s*\n\s*\(", text):
+            num = int(m.group(1))
+            if 1 <= num <= 200:
+                _def_arts.add(m.group(1))
+
+        for art in _def_arts:
+            definitions.setdefault((doc_id, art), set()).add(pn)
+
+        # All mentions: "Article N" anywhere (inline references too)
+        for m in re.finditer(r"\bArticle\s+(\d+)\b", text, re.IGNORECASE):
+            all_mentions.setdefault((doc_id, m.group(1)), set()).add(pn)
+
+        # Add definition pages to all_mentions too
+        for art in _def_arts:
+            all_mentions.setdefault((doc_id, art), set()).add(pn)
+
+    result = {
+        "definitions": {k: sorted(v) for k, v in definitions.items()},
+        "all": {k: sorted(v) for k, v in all_mentions.items()},
+        "page_lookup": page_lookup,
+    }
+    _ARTICLE_INDEX_CACHE[key] = result
+    return result
+
+
 _STOPWORDS = frozenset(
     {
         "what", "is", "are", "was", "were", "the", "a", "an", "of", "in", "on",

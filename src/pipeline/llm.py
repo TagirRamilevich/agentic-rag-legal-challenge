@@ -768,6 +768,8 @@ def answer_with_llm(
     pages: list[dict],
     t0: Optional[float] = None,
     is_comparison: bool = False,
+    article_index: Optional[dict] = None,
+    corpus_pages: Optional[list[dict]] = None,
 ) -> tuple[Any, list[dict], int, int, int, int, str]:
     """
     Returns: (answer, used_pages, ttft_ms, total_ms, input_tokens, output_tokens, model_name)
@@ -802,6 +804,76 @@ def answer_with_llm(
     max_pages = cfg["max_pages"]
     chars_per_page = cfg["chars"]
     max_tokens = cfg["max_tokens"]
+
+    # --- Article index injection: ensure article definition pages are in context ---
+    # Uses pre-built article→page index for precise page injection from FULL corpus
+    # (not just retrieved pages). This guarantees the LLM sees the right article.
+    _article_grounding_pages: Optional[list[dict]] = None  # Will be set if article Q
+    _q_art_for_index = re.search(r"\bArticle\s+(\d+)", question, re.IGNORECASE)
+    if _q_art_for_index and article_index and corpus_pages and not is_comparison:
+        _art_idx_num = _q_art_for_index.group(1)
+        _page_lookup = article_index.get("page_lookup", {})
+        _art_defs = article_index.get("definitions", {})
+
+        # Find target document: from law name in question → doc routing
+        _target_doc_for_art = None
+        _law_name_m = re.search(
+            r"\b(?:the\s+)?((?:Operating|Employment|Trust|Foundations?|"
+            r"General Partnership|Limited Liability Partnership|"
+            r"Common Reporting Standard|Insolvency|Companies|Personal Property|"
+            r"Application of Civil)\s+(?:Law|Standard))\b",
+            question, re.IGNORECASE,
+        )
+        if _law_name_m:
+            _law_name_lower = _law_name_m.group(1).lower()
+            for cp in corpus_pages:
+                if cp["page_number"] == 1:
+                    if _law_name_lower in cp.get("text", "")[:500].lower():
+                        _target_doc_for_art = cp["doc_id"]
+                        break
+        # Also try "DIFC Law No. N" matching
+        if not _target_doc_for_art:
+            _law_no_m = re.search(r"\bLaw\s+No\.?\s*(\d+)\s+of\s+(\d{4})\b", question, re.IGNORECASE)
+            if _law_no_m:
+                _law_num = _law_no_m.group(1)
+                _law_year = _law_no_m.group(2)
+                _law_pat = re.compile(rf"Law\s+No\.?\s*{_law_num}\s+of\s+{_law_year}", re.IGNORECASE)
+                for cp in corpus_pages:
+                    if cp["page_number"] == 1 and _law_pat.search(cp.get("text", "")[:500]):
+                        _target_doc_for_art = cp["doc_id"]
+                        break
+        # Fallback: primary doc from reranked results
+        if not _target_doc_for_art and pages:
+            _target_doc_for_art = pages[0]["doc_id"]
+
+        if _target_doc_for_art:
+            _art_key = (_target_doc_for_art, _art_idx_num)
+            _all_mentions = article_index.get("all", {})
+            # Merge definitions + all mentions, deduplicate, sort ascending.
+            # Definitions alone can have false positives (schedule items "N.").
+            # All mentions include inline refs ("Article N(1)") which are on
+            # the actual article content page. Lowest page numbers are best
+            # since articles appear sequentially in law documents.
+            _def_page_nums = sorted(set(
+                _art_defs.get(_art_key, []) + _all_mentions.get(_art_key, [])
+            ))
+            if _def_page_nums:
+                # Get page objects from lookup
+                _art_inject_objs = []
+                for pn in _def_page_nums[:3]:
+                    pobj = _page_lookup.get((_target_doc_for_art, pn))
+                    if pobj:
+                        _art_inject_objs.append(pobj)
+                if _art_inject_objs:
+                    # Save for later grounding citation
+                    _article_grounding_pages = _art_inject_objs[:2]
+                    # Inject into context: ensure these pages are in top positions
+                    _existing_keys = {(p["doc_id"], p["page_number"]) for p in pages[:max_pages]}
+                    _to_inject = [p for p in _art_inject_objs
+                                  if (p["doc_id"], p["page_number"]) not in _existing_keys]
+                    if _to_inject:
+                        # Insert after first page, pushing others down
+                        pages = pages[:1] + _to_inject[:2] + pages[1:]
 
     # Targeted page injection: if the question asks about specific sections that are
     # typically deep in documents (Schedule tables, Conclusion sections) or specific
@@ -1083,114 +1155,35 @@ def answer_with_llm(
                 return det_ans, det_pages, ttft_ms, total_ms_final, in_tok, out_tok, model + "-det-fallback"
         return None, [], ttft_ms, total_ms_final, in_tok, out_tok, model
 
-    # Use LLM-cited pages for precise grounding; fallback to _find_source_pages
+    # =========================================================================
+    # PAGE SELECTION FOR GROUNDING
+    # =========================================================================
+    # For article questions with index: use article definition pages directly
+    # (bypasses all complex post-processing — the index is precise).
+    # For non-article questions: use LLM CITE + doc filter (simpler v8 logic).
+    if _article_grounding_pages and not is_comparison:
+        source_pages = list(_article_grounding_pages)  # already capped at 2
+        # Page-specific override (e.g., "title page", "last page")
+        _specific_page = _detect_specific_page(question, source_pages, all_pages=pages)
+        if _specific_page:
+            source_pages = _specific_page
+        return answer, source_pages, ttft_ms, total_ms_final, in_tok, out_tok, model
+
+    # --- Non-article questions: LLM CITE + verification ---
     if cited_indices:
         source_pages = [context_pages[i] for i in cited_indices]
     else:
         source_pages = _find_source_pages(answer, context_pages, answer_type)
 
-    # Recall floor: if CITE selected only 1 page, add the next same-doc
-    # context page. With β=2.5, missing a gold page costs 6.25x more than
-    # an extra page. Applied to article questions (articles span pages) and
-    # free_text (gold is typically multi-page for detailed answers).
-    _has_article_ref = bool(re.search(r"\bArticle\s+\d+", question, re.IGNORECASE))
-    _needs_recall_floor = _has_article_ref or answer_type == "free_text"
-    if len(source_pages) == 1 and len(context_pages) >= 2 and _needs_recall_floor:
-        _sp_key = (source_pages[0]["doc_id"], source_pages[0]["page_number"])
-        _sp_doc = source_pages[0]["doc_id"]
-        for cp in context_pages:
-            _cp_key = (cp["doc_id"], cp["page_number"])
-            if _cp_key != _sp_key and cp["doc_id"] == _sp_doc:
-                source_pages.append(cp)
-                break
-
-    # Article-page verification: if question references "Article N" and the cited
-    # page(s) don't contain that article, replace with a page that does.
-    # This catches LLM citation errors (citing a nearby page instead of the article page).
-    # Search _all_pages (full retrieved list), not just context_pages, for better recall.
-    _verified_subclause_page = None
-    if not is_comparison and source_pages and answer_type in ("bool", "boolean", "number", "date", "name"):
-        _q_art_verify = re.search(r"\bArticle\s+(\d+)", question, re.IGNORECASE)
-        if _q_art_verify:
-            _art_v_num = _q_art_verify.group(1)
-            _art_v_pat = re.compile(rf"\bArticle\s+{_art_v_num}\b|(?:^|\n)\s*{_art_v_num}\.\s", re.IGNORECASE)
-            _has_article = any(_art_v_pat.search(p.get("text", "")) for p in source_pages)
-            if not _has_article:
-                # Find a page with this article from the same doc(s) — search ALL retrieved pages
-                _cited_docs = {p["doc_id"] for p in source_pages}
-                _search_pool = _all_pages if _all_pages else context_pages
-                for cp in _search_pool:
-                    if cp["doc_id"] in _cited_docs and _art_v_pat.search(cp.get("text", "")):
-                        source_pages = [cp]
-                        break
-
-    # Post-citation verification for text-matchable types:
-    # For non-comparison: PREFER evidence-verified pages from the primary doc.
-    # Evidence search finds pages where the answer text actually appears,
-    # which is more reliable than LLM citation for extractive types.
-    # For comparison: UNION (need pages from both docs).
-    if answer_type in ("number", "date", "name", "names"):
-        evidence_pages = _find_source_pages(answer, _all_pages, answer_type)
-        if evidence_pages:
-            if not is_comparison and answer_type in ("number", "date", "name"):
-                # Restrict evidence to docs already cited by LLM
-                _primary_docs = {p["doc_id"] for p in source_pages}
-                _filtered_ev = [p for p in evidence_pages if p["doc_id"] in _primary_docs]
-                if _filtered_ev:
-                    # If question references Article N, prefer evidence pages
-                    # that also contain that article (avoids citing a page where
-                    # the answer value appears in a DIFFERENT article).
-                    _q_art_ev = re.search(r"\bArticle\s+(\d+)", question, re.IGNORECASE)
-                    if _q_art_ev and len(_filtered_ev) > 1:
-                        _art_ev_n = _q_art_ev.group(1)
-                        _art_ev_pat = re.compile(rf"\bArticle\s+{_art_ev_n}\b|(?:^|\n)\s*{_art_ev_n}\.(?:\s|$)", re.IGNORECASE)
-                        _art_ev = [p for p in _filtered_ev if _art_ev_pat.search(p.get("text", ""))]
-                        if _art_ev:
-                            # Also keep adjacent pages — articles may span pages
-                            _art_keys = {(p["doc_id"], p["page_number"]) for p in _art_ev}
-                            _adj = {(d, n + delta) for d, n in _art_keys for delta in (-1, 1)}
-                            _art_ev = [p for p in _filtered_ev
-                                       if (p["doc_id"], p["page_number"]) in _art_keys
-                                       or (p["doc_id"], p["page_number"]) in _adj]
-                            # Also search _all_pages for adjacent not in filtered
-                            _ev_keys = {(p["doc_id"], p["page_number"]) for p in _art_ev}
-                            for ap in (_all_pages or []):
-                                ak = (ap["doc_id"], ap["page_number"])
-                                if ak in _adj and ak not in _ev_keys:
-                                    _art_ev.append(ap)
-                                    _ev_keys.add(ak)
-                            _filtered_ev = _art_ev
-                    # UNION: keep CITE pages + add evidence pages (both are valuable).
-                    # CITE knows what the LLM used; evidence knows where answer text is.
-                    _existing_keys = {(p["doc_id"], p["page_number"]) for p in source_pages}
-                    for ep in _filtered_ev:
-                        ek = (ep["doc_id"], ep["page_number"])
-                        if ek not in _existing_keys:
-                            source_pages.append(ep)
-                            _existing_keys.add(ek)
-            else:
-                # UNION for comparison/names (need cross-doc coverage)
-                existing_keys = {(p["doc_id"], p["page_number"]) for p in source_pages}
-                for ep in evidence_pages:
-                    key = (ep["doc_id"], ep["page_number"])
-                    if key not in existing_keys:
-                        source_pages.append(ep)
-                        existing_keys.add(key)
-
-    # For non-comparison questions: restrict to the primary document(s).
-    # Evidence search may find answer text in unrelated docs (e.g., same date
-    # appears in multiple case docs). The LLM-cited doc is the correct one.
+    # For non-comparison: restrict to primary document
     if not is_comparison and len(source_pages) > 1:
         _target_doc_ids: set[str] = set()
-        # Strategy 1: Single case reference → restrict to that case's docs
         _case_refs = re.findall(r"[A-Z]{2,5}\s+\d{3}/\d{4}", question)
         if len(_case_refs) == 1:
             _target_ref = _case_refs[0].replace(" ", "")
             for cp in context_pages:
                 if _target_ref in cp.get("text", "").replace(" ", ""):
                     _target_doc_ids.add(cp["doc_id"])
-        # Strategy 2: Specific law name → restrict to that law's doc
-        # Match law name in the document TITLE (first 300 chars of page 1)
         if not _target_doc_ids:
             _law_m = re.search(
                 r"\b(?:the\s+)?((?:Operating|Employment|Trust|Foundations?|"
@@ -1203,49 +1196,12 @@ def answer_with_llm(
                 _law_name = _law_m.group(1).lower()
                 for cp in _all_pages:
                     if cp["page_number"] == 1:
-                        _title_text = cp.get("text", "")[:300].lower()
-                        if _law_name in _title_text:
-                            _target_doc_ids.add(cp["doc_id"])
-        # Strategy 3: "DIFC Law No. N" → match by law number on page 1
-        if not _target_doc_ids:
-            _law_no_m = re.search(
-                r"\bDIFC\s+Law\s+No\.?\s*(\d+)\b", question, re.IGNORECASE,
-            )
-            if _law_no_m:
-                _law_num = _law_no_m.group(1)
-                _law_no_pat = re.compile(
-                    rf"LAW\s+NO\.?\s*{_law_num}\b", re.IGNORECASE
-                )
-                for cp in _all_pages:
-                    if cp["page_number"] == 1:
-                        _title_text = cp.get("text", "")[:300]
-                        if _law_no_pat.search(_title_text):
+                        if _law_name in cp.get("text", "")[:300].lower():
                             _target_doc_ids.add(cp["doc_id"])
         if _target_doc_ids:
             _filtered = [p for p in source_pages if p["doc_id"] in _target_doc_ids]
             if _filtered:
                 source_pages = _filtered
-
-    # Article-aware page inclusion: if question references a specific Article,
-    # ensure pages containing that article from cited docs are included.
-    # Only add if current source_pages DON'T already contain the article
-    # (avoids adding extra pages that hurt precision when article is already cited).
-    _q_art_matches = re.findall(r"\bArticle\s+(\d+)", question, re.IGNORECASE)
-    if _q_art_matches and source_pages:
-        for _art_num in _q_art_matches[:2]:  # limit to first 2 article refs
-            _art_pat = re.compile(rf"\bArticle\s+{_art_num}\b", re.IGNORECASE)
-            # Check if any current source page already contains this article
-            _already_has = any(_art_pat.search(p.get("text", "")) for p in source_pages)
-            if not _already_has:
-                _existing_keys = {(p["doc_id"], p["page_number"]) for p in source_pages}
-                _cited_doc_ids = {p["doc_id"] for p in source_pages}
-                for p in pages:
-                    if p["doc_id"] in _cited_doc_ids:
-                        key = (p["doc_id"], p["page_number"])
-                        if key not in _existing_keys and _art_pat.search(p.get("text", "")):
-                            source_pages.append(p)
-                            _existing_keys.add(key)
-                            break  # one article page is enough
 
     # For comparison questions: ensure at least 1 page per CASE is cited.
     # Gold expects citations from BOTH cases being compared.
@@ -1321,49 +1277,12 @@ def answer_with_llm(
                     _best_per_doc[did] = p
             source_pages = list(_best_per_doc.values())
 
-    # Article-reference filter: if question mentions "Article N",
-    # prefer pages that actually contain that article reference.
-    # Also keep adjacent pages (±1) from the same doc — articles span pages.
-    # Applied to all extractive types (bool, number, date, name) for non-comparison questions.
-    if not is_comparison and len(source_pages) > 1 and answer_type in ("bool", "boolean", "number", "date", "name"):
-        _q_art_m = re.search(r"\bArticle\s+(\d+)", question, re.IGNORECASE)
-        if _q_art_m:
-            _art_n = _q_art_m.group(1)
-            _art_filter_pat = re.compile(
-                rf"(?:\bArticle\s+{_art_n}\b|\b{_art_n}\.(?:\s|$)|\b{_art_n}\s*\()", re.IGNORECASE
-            )
-            _art_pages = [p for p in source_pages if _art_filter_pat.search(p.get("text", ""))]
-            if _art_pages:
-                # Also keep pages adjacent to article pages (article may span pages)
-                _art_keys = {(p["doc_id"], p["page_number"]) for p in _art_pages}
-                _adjacent = {(p["doc_id"], p["page_number"] + d)
-                             for p in _art_pages for d in (-1, 1)}
-                _keep = [p for p in source_pages
-                         if (p["doc_id"], p["page_number"]) in _art_keys
-                         or (p["doc_id"], p["page_number"]) in _adjacent]
-                # Also search _all_pages for adjacent pages not in source_pages
-                _keep_keys = {(p["doc_id"], p["page_number"]) for p in _keep}
-                for ap in (_all_pages or []):
-                    ak = (ap["doc_id"], ap["page_number"])
-                    if ak in _adjacent and ak not in _keep_keys:
-                        _keep.append(ap)
-                        _keep_keys.add(ak)
-                source_pages = _keep if _keep else _art_pages
-
-    # Final page cap: tighter for non-comparison (single-doc questions) where
-    # gold is typically 1-2 pages, looser for comparison (multi-doc).
-    # Article questions get higher caps because articles often span pages
-    # and missing a gold page costs 6.25x more than an extra page (β=2.5).
-    _is_article_q = bool(re.search(r"\bArticle\s+\d+", question, re.IGNORECASE))
+    # Final page cap: non-comparison single-doc questions typically need 1-2 pages.
+    # Article questions handled by early return above; this is for case/other Qs.
     if is_comparison:
         _MAX_CITED = {
             "bool": 4, "boolean": 4, "number": 3, "date": 3,
             "name": 4, "names": 3, "free_text": 5,
-        }
-    elif _is_article_q:
-        _MAX_CITED = {
-            "bool": 3, "boolean": 3, "number": 3, "date": 3,
-            "name": 3, "names": 3, "free_text": 4,
         }
     else:
         _MAX_CITED = {
