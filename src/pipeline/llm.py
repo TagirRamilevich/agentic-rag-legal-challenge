@@ -864,9 +864,19 @@ def answer_with_llm(
                 _art_defs.get(_art_key, []) + _all_mentions.get(_art_key, [])
             ))
             if _def_page_nums:
+                # Fill gaps between definition pages (continuation pages).
+                # E.g., Art 7 with defs on pages [5, 7] → include page 6.
+                _expanded_pages: list[int] = []
+                for i, pn in enumerate(_def_page_nums[:3]):
+                    _expanded_pages.append(pn)
+                    if i + 1 < len(_def_page_nums):
+                        _next_def = _def_page_nums[i + 1]
+                        # Fill gap pages (max 1 gap page between consecutive defs)
+                        if _next_def - pn == 2:
+                            _expanded_pages.append(pn + 1)
                 # Get page objects from lookup
                 _art_inject_objs = []
-                for pn in _def_page_nums[:3]:
+                for pn in _expanded_pages:
                     pobj = _page_lookup.get((_target_doc_for_art, pn))
                     if pobj:
                         _art_inject_objs.append(pobj)
