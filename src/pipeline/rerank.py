@@ -45,9 +45,11 @@ def rerank_pages(
 
     # Limit reranker input: too many pages → slow CPU inference
     # Keep at most 3×top_k pages for scoring; priority pages always included first
+    # Hard cap at 30 pages total to prevent O(N²) at 1500-page scale
+    _HARD_CAP = 30
     priority_pages = [p for p in pages if p.get("_priority")]
     non_priority = [p for p in pages if not p.get("_priority")]
-    max_non_priority = max(top_k * 3, 12) - len(priority_pages)
+    max_non_priority = min(max(top_k * 3, 12), _HARD_CAP) - len(priority_pages)
     input_pages = priority_pages + non_priority[:max_non_priority]
 
     m = _model(model_name)

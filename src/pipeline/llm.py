@@ -81,6 +81,17 @@ def _provider() -> Optional[str]:
     return None
 
 
+def _is_transient_error(err_str: str) -> bool:
+    """Check if an API error is transient (retryable) vs permanent."""
+    _transient_patterns = [
+        "429", "rate_limit", "rate limit", "overloaded", "529",
+        "500", "502", "503", "504", "server_error", "timeout",
+        "connection", "timed out", "temporarily unavailable",
+    ]
+    err_lower = err_str.lower()
+    return any(p in err_lower for p in _transient_patterns)
+
+
 def _call(
     prompt: str,
     max_tokens: int = 256,
@@ -91,90 +102,102 @@ def _call(
     Call LLM and return (text, ttft_ms, total_ms, input_tokens, output_tokens, model_name).
     ttft_ms is measured from t0 (if given) so it includes pre-LLM pipeline time.
     Uses streaming on Anthropic for accurate TTFT measurement.
+    Retries up to 2 times on transient errors (429, 5xx, timeout).
     """
     _t0 = t0 if t0 is not None else time.perf_counter()
-    p = _provider()
+    _MAX_RETRIES = 2
 
-    try:
-        if p == "anthropic":
-            import anthropic
-            model = "claude-sonnet-4-6" if use_strong_model else "claude-haiku-4-5-20251001"
-            client = _get_anthropic_client()
-            ttft_ms: Optional[int] = None
-            chunks: list[str] = []
-            input_tokens = 0
-            output_tokens = 0
+    for _attempt in range(_MAX_RETRIES + 1):
+        p = _provider()
+        if not p:
+            break
 
-            _timeout = 12.0 if use_strong_model else 6.0
-            with client.messages.stream(
-                model=model,
-                max_tokens=max_tokens,
-                temperature=0,
-                messages=[{"role": "user", "content": prompt}],
-                timeout=_timeout,
-            ) as stream:
-                for chunk in stream.text_stream:
-                    if ttft_ms is None:
-                        ttft_ms = max(1, int((time.perf_counter() - _t0) * 1000))
-                    chunks.append(chunk)
-                final_msg = stream.get_final_message()
-                input_tokens = final_msg.usage.input_tokens
-                output_tokens = final_msg.usage.output_tokens
+        try:
+            if p == "anthropic":
+                import anthropic
+                model = "claude-sonnet-4-6" if use_strong_model else "claude-haiku-4-5-20251001"
+                client = _get_anthropic_client()
+                ttft_ms: Optional[int] = None
+                chunks: list[str] = []
+                input_tokens = 0
+                output_tokens = 0
 
-            total_ms = max(1, int((time.perf_counter() - _t0) * 1000))
-            text = "".join(chunks).strip()
-            return text, ttft_ms or total_ms, total_ms, input_tokens, output_tokens, model
+                _timeout = 20.0 if use_strong_model else 8.0
+                with client.messages.stream(
+                    model=model,
+                    max_tokens=max_tokens,
+                    temperature=0,
+                    messages=[{"role": "user", "content": prompt}],
+                    timeout=_timeout,
+                ) as stream:
+                    for chunk in stream.text_stream:
+                        if ttft_ms is None:
+                            ttft_ms = max(1, int((time.perf_counter() - _t0) * 1000))
+                        chunks.append(chunk)
+                    final_msg = stream.get_final_message()
+                    input_tokens = final_msg.usage.input_tokens
+                    output_tokens = final_msg.usage.output_tokens
 
-        if p == "openrouter":
-            import requests as req
-            model = "anthropic/claude-sonnet-4-6" if use_strong_model else "anthropic/claude-haiku-4-5"
-            r = req.post(
-                "https://openrouter.ai/api/v1/chat/completions",
-                headers={"Authorization": f"Bearer {os.getenv('OPENROUTER_API_KEY')}"},
-                json={
-                    "model": model,
-                    "max_tokens": max_tokens,
-                    "temperature": 0,
-                    "messages": [{"role": "user", "content": prompt}],
-                },
-                timeout=15,
-            )
-            r.raise_for_status()
-            data = r.json()
-            text = data["choices"][0]["message"]["content"].strip()
-            total_ms = max(1, int((time.perf_counter() - _t0) * 1000))
-            usage = data.get("usage", {})
-            in_tok = usage.get("prompt_tokens", 0)
-            out_tok = usage.get("completion_tokens", 0)
-            return text, total_ms, total_ms, in_tok, out_tok, model
+                total_ms = max(1, int((time.perf_counter() - _t0) * 1000))
+                text = "".join(chunks).strip()
+                return text, ttft_ms or total_ms, total_ms, input_tokens, output_tokens, model
 
-        if p == "openai":
-            import openai
-            model = "gpt-4o" if use_strong_model else "gpt-4o-mini"
-            client = openai.OpenAI()
-            r = client.chat.completions.create(
-                model=model,
-                max_tokens=max_tokens,
-                messages=[{"role": "user", "content": prompt}],
-            )
-            text = r.choices[0].message.content.strip()
-            total_ms = max(1, int((time.perf_counter() - _t0) * 1000))
-            return text, total_ms, total_ms, 0, 0, model
+            if p == "openrouter":
+                import requests as req
+                model = "anthropic/claude-sonnet-4-6" if use_strong_model else "anthropic/claude-haiku-4-5"
+                r = req.post(
+                    "https://openrouter.ai/api/v1/chat/completions",
+                    headers={"Authorization": f"Bearer {os.getenv('OPENROUTER_API_KEY')}"},
+                    json={
+                        "model": model,
+                        "max_tokens": max_tokens,
+                        "temperature": 0,
+                        "messages": [{"role": "user", "content": prompt}],
+                    },
+                    timeout=20,
+                )
+                r.raise_for_status()
+                data = r.json()
+                text = data["choices"][0]["message"]["content"].strip()
+                total_ms = max(1, int((time.perf_counter() - _t0) * 1000))
+                usage = data.get("usage", {})
+                in_tok = usage.get("prompt_tokens", 0)
+                out_tok = usage.get("completion_tokens", 0)
+                return text, total_ms, total_ms, in_tok, out_tok, model
 
-    except Exception as e:
-        err_str = str(e)
-        # Detect permanent errors (spending limit, auth, forbidden) → disable provider for session
-        if ("usage limits" in err_str or "API key" in err_str or "authentication" in err_str.lower()
-                or "forbidden" in err_str.lower() or "not allowed" in err_str.lower()):
-            _PROVIDER_DISABLED.add(p)
-            print(f"  LLM provider '{p}' disabled for session: {err_str[:100]}")
-            # Try next provider immediately
-            next_p = _provider()
-            if next_p and next_p != p:
-                print(f"  Falling back to provider: {next_p}")
-                return _call(prompt, max_tokens, use_strong_model, _t0)
-        else:
-            print(f"  LLM error ({p}): {e}")
+            if p == "openai":
+                import openai
+                model = "gpt-4o" if use_strong_model else "gpt-4o-mini"
+                client = openai.OpenAI()
+                r = client.chat.completions.create(
+                    model=model,
+                    max_tokens=max_tokens,
+                    messages=[{"role": "user", "content": prompt}],
+                )
+                text = r.choices[0].message.content.strip()
+                total_ms = max(1, int((time.perf_counter() - _t0) * 1000))
+                return text, total_ms, total_ms, 0, 0, model
+
+        except Exception as e:
+            err_str = str(e)
+            # Detect permanent errors (spending limit, auth, forbidden) → disable provider
+            if ("usage limits" in err_str or "API key" in err_str
+                    or "authentication" in err_str.lower()
+                    or "forbidden" in err_str.lower() or "not allowed" in err_str.lower()):
+                _PROVIDER_DISABLED.add(p)
+                print(f"  LLM provider '{p}' disabled for session: {err_str[:100]}")
+                # Try next provider immediately (counts as retry)
+                next_p = _provider()
+                if next_p and next_p != p:
+                    print(f"  Falling back to provider: {next_p}")
+                    continue
+            elif _is_transient_error(err_str) and _attempt < _MAX_RETRIES:
+                _backoff = 2 ** _attempt  # 1s, 2s
+                print(f"  LLM transient error ({p}), retry {_attempt + 1}/{_MAX_RETRIES} in {_backoff}s: {err_str[:80]}")
+                time.sleep(_backoff)
+                continue
+            else:
+                print(f"  LLM error ({p}): {e}")
 
     total_ms = max(1, int((time.perf_counter() - _t0) * 1000))
     return None, total_ms, total_ms, 0, 0, "unknown"
