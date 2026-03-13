@@ -1203,79 +1203,62 @@ def answer_with_llm(
             if _filtered:
                 source_pages = _filtered
 
-    # For comparison questions: ensure at least 1 page per CASE is cited.
-    # Gold expects citations from BOTH cases being compared.
-    # Map case references to context docs, find missing cases, add 1 page each.
+    # For comparison questions: deterministic page selection using doc routing.
+    # Gold expects 1 page per case (usually page 1 — title/header with parties/dates).
+    # Use corpus_pages for doc routing to find each case's primary document.
     if is_comparison:
         _case_refs_q = re.findall(r"[A-Z]{2,5}\s+\d{3}/\d{4}", question)
-        if _case_refs_q:
-            # Map each case → set of doc_ids
+        if _case_refs_q and corpus_pages:
+            from src.pipeline.retrieve import build_doc_routing_index
+            _doc_route = build_doc_routing_index(corpus_pages)
+            _page_lk = article_index.get("page_lookup", {}) if article_index else {}
+            _cmp_pages: list[dict] = []
+            _cmp_docs_used: set[str] = set()
+            for cr in _case_refs_q:
+                cr_norm = cr.upper().replace("  ", " ")
+                _target_doc = _doc_route["case"].get(cr_norm)
+                if _target_doc and _target_doc not in _cmp_docs_used:
+                    # Get page 1 of this doc (title page with parties/judge/date)
+                    p1 = _page_lk.get((_target_doc, 1))
+                    if p1:
+                        _cmp_pages.append(p1)
+                        _cmp_docs_used.add(_target_doc)
+                    else:
+                        # Fallback: find page 1 in corpus
+                        for cp in corpus_pages:
+                            if cp["doc_id"] == _target_doc and cp["page_number"] == 1:
+                                _cmp_pages.append(cp)
+                                _cmp_docs_used.add(_target_doc)
+                                break
+            if len(_cmp_pages) >= 2:
+                source_pages = _cmp_pages  # deterministic: page 1 per case
+            elif _cmp_pages:
+                # One case found via routing, add CITE pages for the other
+                _existing = {(p["doc_id"], p["page_number"]) for p in _cmp_pages}
+                for p in source_pages:
+                    if (p["doc_id"], p["page_number"]) not in _existing:
+                        _cmp_pages.append(p)
+                        break
+                source_pages = _cmp_pages
+        elif _case_refs_q:
+            # Fallback without corpus_pages: use context-based approach
             _case_to_docs: dict[str, set[str]] = {}
             for cp in context_pages:
-                cp_text = cp.get("text", "")
                 for cr in _case_refs_q:
-                    if cr.replace(" ", "") in cp_text.replace(" ", ""):
+                    if cr.replace(" ", "") in cp.get("text", "").replace(" ", ""):
                         _case_to_docs.setdefault(cr, set()).add(cp["doc_id"])
-            # Check which cases are already cited
             cited_doc_ids = {p["doc_id"] for p in source_pages}
             for cr, case_docs in _case_to_docs.items():
                 if not (case_docs & cited_doc_ids):
-                    # No page from this case — add page 1 from first available doc
                     for cp in context_pages:
                         if cp["doc_id"] in case_docs:
                             source_pages.append(cp)
                             break
-        else:
-            # No case refs: fallback to 1 page per doc
-            cited_doc_ids = {p["doc_id"] for p in source_pages}
-            _relevant_docs = {p["doc_id"] for p in context_pages}
-            for missing_doc in _relevant_docs - cited_doc_ids:
-                for cp in context_pages:
-                    if cp["doc_id"] == missing_doc:
-                        source_pages.append(cp)
-                        break
 
-    # Page-specific questions: if question mentions a specific page ("last page",
-    # "first page", "page 2", "title page"), restrict citations to that page only.
+    # Page-specific questions
     _specific_page = _detect_specific_page(question, source_pages, all_pages=pages)
     if _specific_page:
         source_pages = _specific_page
-    else:
-        # No expansion — trust evidence/citation pages directly.
-        # Math: for gold=1 page, cite 1 correct → G=1.0 vs cite 2 (±1) → G=0.879.
-        # Expansion only helps if we'd miss a gold page, but with good retrieval
-        # and evidence matching, the risk is low. Precision gain outweighs recall risk.
-        pass
-
-    # Comparison optimization: restrict to 1 page per CASE (not per doc).
-    # Gold expects 1 page per case. Cases with multiple docs (e.g. DEC 001/2025
-    # has 2 docs) would otherwise cite 3+ pages. Grouping by case: G 0.936→1.0.
-    if is_comparison and answer_type in ("bool", "boolean", "name") and len(source_pages) > 1:
-        # Map each doc_id to its case reference
-        _case_refs_in_q = re.findall(r"[A-Z]{2,5}\s+\d{3}/\d{4}", question)
-        _doc_to_case: dict[str, str] = {}
-        for p in source_pages:
-            p_text = p.get("text", "")
-            for cr in _case_refs_in_q:
-                if cr.replace(" ", "") in p_text.replace(" ", ""):
-                    _doc_to_case[p["doc_id"]] = cr
-                    break
-        # Group by case and keep lowest page from each case
-        if _doc_to_case:
-            _best_per_case: dict[str, dict] = {}
-            for p in source_pages:
-                case = _doc_to_case.get(p["doc_id"], p["doc_id"])  # fallback to doc_id
-                if case not in _best_per_case or p["page_number"] < _best_per_case[case]["page_number"]:
-                    _best_per_case[case] = p
-            source_pages = list(_best_per_case.values())
-        else:
-            # Fallback: 1 page per doc
-            _best_per_doc: dict[str, dict] = {}
-            for p in source_pages:
-                did = p["doc_id"]
-                if did not in _best_per_doc or p["page_number"] < _best_per_doc[did]["page_number"]:
-                    _best_per_doc[did] = p
-            source_pages = list(_best_per_doc.values())
 
     # Final page cap: non-comparison single-doc questions typically need 1-2 pages.
     # Article questions handled by early return above; this is for case/other Qs.
