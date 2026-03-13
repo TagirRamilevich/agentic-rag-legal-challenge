@@ -866,6 +866,17 @@ def answer_with_llm(
                     if pobj:
                         _art_inject_objs.append(pobj)
                 if _art_inject_objs:
+                    # Recall floor: if only 1 article page found, check if article
+                    # continues on the next page (many articles span 2 pages).
+                    # Missing a gold page costs G: 1.0→0.537. Extra page: 1.0→0.879.
+                    if len(_art_inject_objs) == 1:
+                        _next_pn = _art_inject_objs[0]["page_number"] + 1
+                        _next_p = _page_lookup.get((_target_doc_for_art, _next_pn))
+                        if _next_p:
+                            # Only add if next page doesn't start a NEW article
+                            _next_text = _next_p.get("text", "")[:100]
+                            if not re.match(r"\s*Article\s+\d+\b", _next_text, re.IGNORECASE):
+                                _art_inject_objs.append(_next_p)
                     # Save for later grounding citation
                     _article_grounding_pages = _art_inject_objs[:2]
                     # Inject into context: ensure these pages are in top positions
