@@ -337,15 +337,14 @@ _LAW_NO_EXACT_RE = re.compile(r"\bLaw No\.\s*\d+\s+of\s+\d{4}\b", re.IGNORECASE)
 
 def _find_enactment_notice_doc(
     sub_q: str,
-    pages: list[dict],
+    page1_list: list[tuple[int, dict]],
     doc_page_counts: dict,
-    doc_page_index: dict,
 ) -> str:
     """For a 'Law No. X of YYYY' sub-query, return the enactment notice doc_id (1-page doc).
     Returns empty string if not found."""
     sq_lower = sub_q.lower()
-    for p in pages:
-        if p["page_number"] == 1 and doc_page_counts.get(p["doc_id"], 99) <= 2:
+    for _, p in page1_list:
+        if doc_page_counts.get(p["doc_id"], 99) <= 2:
             t_lower = p["text"].lower()
             if "enactment notice" in t_lower and sq_lower in t_lower:
                 return p["doc_id"]
@@ -373,6 +372,17 @@ def retrieve_pages(
 
     from collections import Counter as _CounterDP
     _doc_page_counts = _CounterDP(p["doc_id"] for p in pages)
+
+    # Pre-build O(1) lookup indices (replaces ~17 O(N) corpus scans per question)
+    _page1_list: list[tuple[int, dict]] = []  # [(idx, page), ...] for page_number==1
+    _doc_pages: dict[str, list[tuple[int, dict]]] = {}  # doc_id → [(idx, page), ...]
+    for _i, _p in enumerate(pages):
+        _did = _p["doc_id"]
+        if _did not in _doc_pages:
+            _doc_pages[_did] = []
+        _doc_pages[_did].append((_i, _p))
+        if _p["page_number"] == 1:
+            _page1_list.append((_i, _p))
 
     # Use document routing to boost known entities
     doc_route = build_doc_routing_index(pages)
@@ -433,7 +443,7 @@ def retrieve_pages(
                 # For date/commencement questions, prefer enactment notice (1-page doc).
                 if _date_q:
                     notice_doc = _find_enactment_notice_doc(
-                        sq, pages, _doc_page_counts, doc_page_index
+                        sq, _page1_list, _doc_page_counts
                     )
                     if notice_doc:
                         top_doc_id = notice_doc
@@ -452,16 +462,15 @@ def retrieve_pages(
                         best_match_cnt = 0
                         best_match_doc = ""
                         best_match_pages = 0
-                        for p in pages:
-                            if p["page_number"] == 1:
-                                t_low = p["text"].lower()[:300]
-                                tc = sum(1 for t in sq_terms if t in t_low)
-                                pc = _doc_page_counts.get(p["doc_id"], 0)
-                                if tc >= len(sq_terms) * 0.7:
-                                    if tc > best_match_cnt or (tc == best_match_cnt and pc > best_match_pages):
-                                        best_match_cnt = tc
-                                        best_match_doc = p["doc_id"]
-                                        best_match_pages = pc
+                        for _, _p1 in _page1_list:
+                            t_low = _p1["text"].lower()[:300]
+                            tc = sum(1 for t in sq_terms if t in t_low)
+                            pc = _doc_page_counts.get(_p1["doc_id"], 0)
+                            if tc >= len(sq_terms) * 0.7:
+                                if tc > best_match_cnt or (tc == best_match_cnt and pc > best_match_pages):
+                                    best_match_cnt = tc
+                                    best_match_doc = _p1["doc_id"]
+                                    best_match_pages = pc
                         if best_match_doc:
                             top_doc_id = best_match_doc
                 for early_pg in (1, 2, 3, 4):
@@ -559,22 +568,17 @@ def retrieve_pages(
             law_name = best_law_name.lower()
             best_doc: str = ""
             best_match_len: int = 0
-            best_page_count: int = 0
-            for p in pages:
-                if p["page_number"] == 1:
-                    text_lower = p["text"].lower()
-                    # Score: length of matching prefix in title line
-                    if law_name in text_lower:
-                        cnt = _doc_page_counts[p["doc_id"]]
-                        # Prefer exact match in title (first 100 chars); penalize amendment diffs
-                        in_title = law_name in text_lower[:100]
-                        is_consolidated = "consolidated" in text_lower[:300]
-                        is_amendment_diff = "underlining indicates new text" in text_lower[:300]
-                        score = (int(in_title) * 1000) + (int(is_consolidated) * 500) - (int(is_amendment_diff) * 500) + cnt
-                        if score > best_match_len:
-                            best_match_len = score
-                            best_doc = p["doc_id"]
-                            best_page_count = cnt
+            for _, _p1 in _page1_list:
+                text_lower = _p1["text"].lower()
+                if law_name in text_lower:
+                    cnt = _doc_page_counts[_p1["doc_id"]]
+                    in_title = law_name in text_lower[:100]
+                    is_consolidated = "consolidated" in text_lower[:300]
+                    is_amendment_diff = "underlining indicates new text" in text_lower[:300]
+                    score = (int(in_title) * 1000) + (int(is_consolidated) * 500) - (int(is_amendment_diff) * 500) + cnt
+                    if score > best_match_len:
+                        best_match_len = score
+                        best_doc = _p1["doc_id"]
             if best_doc:
                 top_doc_id = best_doc
         # Collect all article-matching pages; sort by relevance to question
@@ -583,8 +587,8 @@ def retrieve_pages(
             if w.lower() not in _STOPWORDS
         )
         _art_candidates: list[tuple[int, int]] = []  # (relevance_score, idx)
-        for idx, p in enumerate(pages):
-            if p["doc_id"] == top_doc_id and article_pat.search(p["text"]):
+        for idx, p in _doc_pages.get(top_doc_id, []):
+            if article_pat.search(p["text"]):
                 _is_toc = "CONTENTS" in p["text"][:300] or "TABLE OF CONTENTS" in p["text"][:300]
                 if _is_toc:
                     continue
@@ -645,8 +649,8 @@ def retrieve_pages(
                 continue
             # Search for the article page in this doc
             _art_pat2 = re.compile(rf"(?:\bArticle\s+{art_num}\b|(?:^|\n)\s*{art_num}[.(])", re.IGNORECASE | re.MULTILINE)
-            for idx2, p in enumerate(pages):
-                if p["doc_id"] == _law_doc_id and _art_pat2.search(p["text"]):
+            for idx2, p in _doc_pages.get(_law_doc_id, []):
+                if _art_pat2.search(p["text"]):
                     _is_toc2 = "CONTENTS" in p["text"][:300] or "TABLE OF CONTENTS" in p["text"][:300]
                     if _is_toc2:
                         continue
@@ -682,19 +686,18 @@ def retrieve_pages(
             # Find the largest doc whose p.1 contains the law reference
             best_law_doc = ""
             best_cnt = 0
-            for p in pages:
-                if p["page_number"] == 1:
-                    t_low = p["text"].lower()
-                    if sq_lower in t_low or any(w in t_low for w in sq_lower.split() if len(w) > 3):
-                        cnt = _doc_page_counts.get(p["doc_id"], 0)
-                        if cnt > best_cnt and cnt > 2:  # prefer substantive docs
-                            terms = [w for w in sq_lower.split() if len(w) > 3]
-                            if sum(1 for t in terms if t in t_low) >= len(terms) * 0.6:
-                                best_cnt = cnt
-                                best_law_doc = p["doc_id"]
+            for _, _p1 in _page1_list:
+                t_low = _p1["text"].lower()
+                if sq_lower in t_low or any(w in t_low for w in sq_lower.split() if len(w) > 3):
+                    cnt = _doc_page_counts.get(_p1["doc_id"], 0)
+                    if cnt > best_cnt and cnt > 2:  # prefer substantive docs
+                        terms = [w for w in sq_lower.split() if len(w) > 3]
+                        if sum(1 for t in terms if t in t_low) >= len(terms) * 0.6:
+                            best_cnt = cnt
+                            best_law_doc = _p1["doc_id"]
             if best_law_doc:
-                for idx2, p2 in enumerate(pages):
-                    if p2["doc_id"] == best_law_doc and _admin_pat.search(p2["text"]):
+                for idx2, p2 in _doc_pages.get(best_law_doc, []):
+                    if _admin_pat.search(p2["text"]):
                         if idx2 not in result or not result[idx2].get("_priority"):
                             tagged2 = dict(p2)
                             tagged2["_priority"] = True
@@ -733,23 +736,20 @@ def retrieve_pages(
             best_law_q = max(law_phrases_q, key=len)
             best_doc2: str = ""
             best_score2: int = 0
-            for p in pages:
-                if p["page_number"] == 1:
-                    # Normalize whitespace for matching (PDFs have newlines in titles)
-                    text_lower = " ".join(p["text"].lower().split())
-                    if best_law_q in text_lower:
-                        # "in_title": law appears before any "as amended by" / "consolidated" section
-                        cutoff = min(text_lower.find("as amended"), text_lower.find("consolidated"))
-                        cutoff = max(cutoff, 0) if cutoff >= 0 else 300
-                        in_title = best_law_q in text_lower[:cutoff] if cutoff > 10 else best_law_q in text_lower[:100]
-                        cnt = _doc_page_counts[p["doc_id"]]
-                        # Prefer consolidated versions; penalize amendment-diff docs
-                        is_consolidated = "consolidated" in text_lower[:300]
-                        is_amendment_diff = "underlining indicates new text" in text_lower[:300]
-                        score = (int(in_title) * 10000) + (int(is_consolidated) * 5000) - (int(is_amendment_diff) * 5000) + cnt
-                        if score > best_score2:
-                            best_score2 = score
-                            best_doc2 = p["doc_id"]
+            for _, _p1 in _page1_list:
+                # Normalize whitespace for matching (PDFs have newlines in titles)
+                text_lower = " ".join(_p1["text"].lower().split())
+                if best_law_q in text_lower:
+                    cutoff = min(text_lower.find("as amended"), text_lower.find("consolidated"))
+                    cutoff = max(cutoff, 0) if cutoff >= 0 else 300
+                    in_title = best_law_q in text_lower[:cutoff] if cutoff > 10 else best_law_q in text_lower[:100]
+                    cnt = _doc_page_counts[_p1["doc_id"]]
+                    is_consolidated = "consolidated" in text_lower[:300]
+                    is_amendment_diff = "underlining indicates new text" in text_lower[:300]
+                    score = (int(in_title) * 10000) + (int(is_consolidated) * 5000) - (int(is_amendment_diff) * 5000) + cnt
+                    if score > best_score2:
+                        best_score2 = score
+                        best_doc2 = _p1["doc_id"]
             if best_doc2:
                 top_doc_id = best_doc2
         for pg in (1, 2):
@@ -773,15 +773,15 @@ def retrieve_pages(
     ))
     if _is_date_of_issue_q and case_refs:
         for case_ref in case_refs[:2]:
-            for idx, p in enumerate(pages):
-                if p["page_number"] == 1 and case_ref.replace(" ", "") in p["text"].replace(" ", ""):
-                    if idx not in result or not result.get(idx, {}).get("_priority"):
-                        tagged = dict(pages[idx])
+            for _idx1, _p1 in _page1_list:
+                if case_ref.replace(" ", "") in _p1["text"].replace(" ", ""):
+                    if _idx1 not in result or not result.get(_idx1, {}).get("_priority"):
+                        tagged = dict(pages[_idx1])
                         tagged["_priority"] = True
-                        priority.append(idx)
-                        result[idx] = tagged
-                        if idx not in top_indices:
-                            top_indices.append(idx)
+                        priority.append(_idx1)
+                        result[_idx1] = tagged
+                        if _idx1 not in top_indices:
+                            top_indices.append(_idx1)
                     break
 
     # "Same law number" / definition questions: pin pages that define "Law" with
@@ -813,10 +813,10 @@ def retrieve_pages(
                 found_en = True
         # If no enactment notice in result, add the first one found in corpus
         if not found_en:
-            for p in pages:
-                if p["page_number"] == 1 and _doc_page_counts.get(p["doc_id"], 99) <= 2:
-                    if _en_pat.search(p["text"]):
-                        j = doc_page_index.get((p["doc_id"], 1))
+            for _idx1, _p1 in _page1_list:
+                if _doc_page_counts.get(_p1["doc_id"], 99) <= 2:
+                    if _en_pat.search(_p1["text"]):
+                        j = doc_page_index.get((_p1["doc_id"], 1))
                         if j is not None:
                             tagged = dict(pages[j])
                             tagged["_priority"] = True
@@ -838,17 +838,15 @@ def retrieve_pages(
         if len(q_tokens) >= 2:
             top_doc_id = pages[main_indices[0]]["doc_id"]
             # Check if top doc is a multi-page law/legal doc
-            doc_pages_count = sum(1 for p in pages if p["doc_id"] == top_doc_id)
-            if doc_pages_count >= 4:
+            if _doc_page_counts.get(top_doc_id, 0) >= 4:
                 # Find pages in this doc that match multiple query terms
-                for idx, p in enumerate(pages):
-                    if p["doc_id"] == top_doc_id:
-                        text_lower = p["text"].lower()
-                        matches = sum(1 for t in q_tokens if t in text_lower)
-                        if matches >= max(2, len(q_tokens) // 2):
-                            if idx not in result:
-                                result[idx] = pages[idx]
-                                top_indices.append(idx)
+                for idx, p in _doc_pages.get(top_doc_id, []):
+                    text_lower = p["text"].lower()
+                    matches = sum(1 for t in q_tokens if t in text_lower)
+                    if matches >= max(2, len(q_tokens) // 2):
+                        if idx not in result:
+                            result[idx] = pages[idx]
+                            top_indices.append(idx)
 
     # Case-specific questions: for short case documents (<= 5 pages),
     # always include all pages when the question references the case number.
@@ -861,10 +859,10 @@ def retrieve_pages(
     )
     for case_ref in case_refs[:2]:
         # Find doc with this case ref in first page text
-        for idx, p in enumerate(pages):
-            if p["page_number"] == 1 and case_ref.replace(" ", "") in p["text"].replace(" ", ""):
-                case_doc_id = p["doc_id"]
-                case_pages_list = [j for j, pp in enumerate(pages) if pp["doc_id"] == case_doc_id]
+        for _idx1, _p1 in _page1_list:
+            if case_ref.replace(" ", "") in _p1["text"].replace(" ", ""):
+                case_doc_id = _p1["doc_id"]
+                case_pages_list = [j for j, _ in _doc_pages.get(case_doc_id, [])]
                 if len(case_pages_list) <= 6:
                     # Small case doc: include all pages as priority
                     for j in case_pages_list:
@@ -906,8 +904,8 @@ def retrieve_pages(
                         top_doc_id = doc_id
                         break
             _fine_pat = re.compile(r"\bschedule\b.*\bfine|fine.*\bschedule\b|\bmaximum fine\b|\bfines and fees\b", re.IGNORECASE)
-            for idx2, p2 in enumerate(pages):
-                if p2["doc_id"] == top_doc_id and _fine_pat.search(p2["text"]):
+            for idx2, p2 in _doc_pages.get(top_doc_id, []):
+                if _fine_pat.search(p2["text"]):
                     if idx2 not in result or not result.get(idx2, {}).get("_priority"):
                         tagged2 = dict(p2)
                         tagged2["_priority"] = True
@@ -919,11 +917,12 @@ def retrieve_pages(
     # "Last page" questions: pin the last page of the specified case document.
     if re.search(r"\blast page\b", question, re.IGNORECASE) and case_refs:
         for case_ref in case_refs[:1]:
-            for idx, p in enumerate(pages):
-                if p["page_number"] == 1 and case_ref.replace(" ", "") in p["text"].replace(" ", ""):
-                    case_doc_id = p["doc_id"]
+            for _idx1, _p1 in _page1_list:
+                if case_ref.replace(" ", "") in _p1["text"].replace(" ", ""):
+                    case_doc_id = _p1["doc_id"]
                     # Find the last page of this document
-                    max_pg = max(pp["page_number"] for pp in pages if pp["doc_id"] == case_doc_id)
+                    _dp = _doc_pages.get(case_doc_id, [])
+                    max_pg = max(pp["page_number"] for _, pp in _dp) if _dp else 0
                     last_j = doc_page_index.get((case_doc_id, max_pg))
                     if last_j is not None:
                         tagged = dict(pages[last_j])
@@ -939,9 +938,9 @@ def retrieve_pages(
     if _page_n_m and case_refs:
         target_pg = int(_page_n_m.group(1)) if _page_n_m.group(1) else 2
         for case_ref in case_refs[:1]:
-            for idx, p in enumerate(pages):
-                if p["page_number"] == 1 and case_ref.replace(" ", "") in p["text"].replace(" ", ""):
-                    j = doc_page_index.get((p["doc_id"], target_pg))
+            for _idx1, _p1 in _page1_list:
+                if case_ref.replace(" ", "") in _p1["text"].replace(" ", ""):
+                    j = doc_page_index.get((_p1["doc_id"], target_pg))
                     if j is not None:
                         tagged = dict(pages[j])
                         tagged["_priority"] = True
@@ -959,12 +958,12 @@ def retrieve_pages(
             re.IGNORECASE,
         )
         for case_ref in case_refs[:1]:  # Only for the primary case
-            for idx2, p2 in enumerate(pages):
-                if p2["page_number"] == 1 and case_ref.replace(" ", "") in p2["text"].replace(" ", ""):
-                    case_doc_id = p2["doc_id"]
+            for _idx1, _p1 in _page1_list:
+                if case_ref.replace(" ", "") in _p1["text"].replace(" ", ""):
+                    case_doc_id = _p1["doc_id"]
                     # Find order pages in this doc
-                    for idx3, p3 in enumerate(pages):
-                        if p3["doc_id"] == case_doc_id and _order_pat.search(p3["text"]):
+                    for idx3, p3 in _doc_pages.get(case_doc_id, []):
+                        if _order_pat.search(p3["text"]):
                             if idx3 not in result or not result.get(idx3, {}).get("_priority"):
                                 tagged3 = dict(pages[idx3])
                                 tagged3["_priority"] = True
@@ -987,8 +986,8 @@ def retrieve_pages(
     if _amend_q and re.search(r"\bwhich\b|\bwhat\b|\blist\b", question, re.IGNORECASE):
         amend_ref = _amend_q.group(1).strip().lower()
         # Search all doc title pages for this reference
-        for idx, p in enumerate(pages):
-            if p["page_number"] == 1 and amend_ref in p["text"].lower():
+        for idx, p in _page1_list:
+            if amend_ref in p["text"].lower():
                 if idx not in result:
                     tagged = dict(pages[idx])
                     tagged["_priority"] = True

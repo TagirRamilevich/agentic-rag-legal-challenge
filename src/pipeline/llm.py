@@ -656,13 +656,57 @@ def _number_search_variants(v: Any) -> list[str]:
             if i < 100:
                 # Legal docs use "word (digit)" format: "twelve (12) months"
                 word = _NUM_WORDS.get(i)
+                variants = [str(i)]  # always include bare digit
                 if word:
-                    return [f"{word} ({i})", word]
-                return []
+                    variants = [f"{word} ({i})", word, str(i)]
+                return variants
             return [str(i), f"{i:,}"]
         return [str(n)]
     except Exception:
         return [str(v)]
+
+
+def _verify_in_text(answer: Any, answer_type: str, pages: list[dict]) -> bool:
+    """Check if a typed answer actually appears verbatim in the context pages.
+
+    Returns True if the answer value is found in the text of at least one page.
+    This prevents hallucinated answers that aren't grounded in the documents.
+    """
+    if answer is None or not pages:
+        return False
+    if answer_type in ("bool", "boolean", "free_text"):
+        return True  # can't verify these by text match
+
+    for p in pages:
+        text = p.get("text", "")
+        if answer_type == "number":
+            variants = _number_search_variants(answer)
+            for v in variants:
+                if v and re.search(re.escape(v), text, re.IGNORECASE):
+                    return True
+            # Also check raw digit string for large numbers
+            raw = str(int(answer)) if isinstance(answer, (int, float)) and answer == int(answer) else str(answer)
+            if raw in text.replace(",", "").replace(" ", ""):
+                return True
+        elif answer_type == "date":
+            variants = _date_search_variants(str(answer))
+            for v in variants:
+                if v in text:
+                    return True
+        elif answer_type == "name":
+            val = str(answer).strip()
+            if val.lower() in text.lower():
+                return True
+            # Case refs without spaces
+            if re.match(r"[A-Z]{2,5}\s+\d{3}/\d{4}", val):
+                if val.replace(" ", "") in text.replace(" ", ""):
+                    return True
+        elif answer_type == "names" and isinstance(answer, list):
+            # Verify at least one name appears
+            for name in answer:
+                if name.lower() in text.lower():
+                    return True
+    return False
 
 
 def _find_source_pages(answer: Any, pages: list[dict], answer_type: str = "") -> list[dict]:
@@ -1298,6 +1342,7 @@ def answer_with_llm(
         return None, [], elapsed, elapsed, 0, 0, "none"
 
     context = "\n\n---\n\n".join(context_parts)
+
     # Comparison booleans get chain-of-thought prompt with higher max_tokens
     _effective_max_tokens = max_tokens
     if is_comparison and answer_type in ("bool", "boolean"):
@@ -1474,6 +1519,21 @@ def answer_with_llm(
                         if re.search(r"\bshall be deemed\b.*\b(?:to be|a|an)\b", txt, re.IGNORECASE):
                             answer = True
                             break
+
+    # =========================================================================
+    # POST-LLM VERIFICATION: check that the LLM answer is grounded in text.
+    # If not, try deterministic extraction as a more reliable fallback.
+    # This catches LLM hallucinations for typed answers.
+    # =========================================================================
+    if answer is not None and answer_type not in ("bool", "boolean", "free_text"):
+        _llm_verified = _verify_in_text(answer, answer_type, context_pages)
+        if not _llm_verified:
+            # LLM answer not found in context — likely hallucinated
+            from src.pipeline.answer import answer_question as _det_verify
+            _det_v, _det_vp = _det_verify(question_data, context_pages)
+            if _det_v is not None and _verify_in_text(_det_v, answer_type, context_pages):
+                answer = _det_v
+                cited_indices = []  # reset citation — will use evidence-based grounding
 
     total_ms_final = max(1, int((time.perf_counter() - _t0) * 1000))
 
