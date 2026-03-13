@@ -477,6 +477,9 @@ def _parse(raw: str, answer_type: str) -> Any:
         if _word_num:
             raw = _word_num.group(1)
         val = parse_number(raw)
+        # Fix accounting-negative false positives: (7) → -7 but no "-" in raw
+        if val is not None and val < 0 and "-" not in raw:
+            val = -val
         # Fallback: word-number conversion if parse_number failed
         if val is None:
             _WORD_NUMS = {
@@ -741,6 +744,8 @@ def _detect_specific_page(question: str, source_pages: list[dict],
             if p["doc_id"] not in seen_docs:
                 # Find page 1 of this doc in search_pool
                 p1 = next((pp for pp in search_pool if pp["doc_id"] == p["doc_id"] and pp["page_number"] == 1), None)
+                if not p1 and p["page_number"] == 1:
+                    p1 = p  # source_page is already page 1
                 if p1:
                     result_pages.append(p1)
                     seen_docs.add(p["doc_id"])
@@ -878,7 +883,7 @@ def answer_with_llm(
                             if not re.match(r"\s*Article\s+\d+\b", _next_text, re.IGNORECASE):
                                 _art_inject_objs.append(_next_p)
                     # Save for later grounding citation
-                    _article_grounding_pages = _art_inject_objs[:2]
+                    _article_grounding_pages = _art_inject_objs[:3]
                     # Inject into context: ensure these pages are in top positions
                     _existing_keys = {(p["doc_id"], p["page_number"]) for p in pages[:max_pages]}
                     _to_inject = [p for p in _art_inject_objs
@@ -1178,7 +1183,7 @@ def answer_with_llm(
     # (bypasses all complex post-processing — the index is precise).
     # For non-article questions: use LLM CITE + doc filter (simpler v8 logic).
     if _article_grounding_pages and not is_comparison:
-        source_pages = list(_article_grounding_pages)  # already capped at 2
+        source_pages = list(_article_grounding_pages)  # capped at 3
         # Page-specific override (e.g., "title page", "last page")
         _specific_page = _detect_specific_page(question, source_pages, all_pages=pages)
         if _specific_page:
