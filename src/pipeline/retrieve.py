@@ -100,10 +100,15 @@ def build_article_page_index(pages: list[dict]) -> dict:
             _def_arts.add(m.group(1))
 
         # "N." section heading followed by uppercase (e.g., "14. Termination")
+        _n_dot_arts: set[str] = set()
         for m in re.finditer(r"(?:^|\n)\s*(\d+)\.\s+[A-Z]", text):
             num = int(m.group(1))
             if 1 <= num <= 200:
-                _def_arts.add(m.group(1))
+                _n_dot_arts.add(m.group(1))
+        # Skip ToC/index pages: if >10 N. matches, it's a Table of Contents listing,
+        # not actual article definitions. These add false positives to grounding.
+        if len(_n_dot_arts) <= 10:
+            _def_arts.update(_n_dot_arts)
 
         # "N(" sub-clause start (e.g., "14(1) The employer shall...")
         for m in re.finditer(r"(?:^|\n)\s*(\d+)\(", text):

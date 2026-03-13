@@ -1135,7 +1135,8 @@ def answer_with_llm(
     # Trust deterministic date extraction over LLM for "which case has earlier date" questions.
     if answer_type == "name" and is_comparison and isinstance(answer, str):
         _q_lower_cmp = question.lower()
-        if re.search(r"\b(earlier|later|first)\b.*\b(date|issue)", _q_lower_cmp):
+        if re.search(r"\b(earlier|later|first)\b.*\b(date|issue)|"
+                     r"\b(date|issue)\b.*\b(earlier|later|first)\b", _q_lower_cmp):
             from src.pipeline.answer import _extract_comparison_date_name
             _det_cmp, _det_cmp_pg = _extract_comparison_date_name(pages, question)
             if _det_cmp is not None and _det_cmp != answer:
@@ -1173,9 +1174,18 @@ def answer_with_llm(
             source_pages = _specific_page
         return answer, source_pages, ttft_ms, total_ms_final, in_tok, out_tok, model
 
-    # --- Non-article questions: LLM CITE + verification ---
+    # --- Non-article questions: LLM CITE + evidence UNION ---
     if cited_indices:
         source_pages = [context_pages[i] for i in cited_indices]
+        # Evidence UNION for number/date/name/names: also add pages containing the
+        # answer value. CITE may miss pages the answer was actually extracted from.
+        # β=2.5 means recall is 6.25x more important than precision.
+        if answer_type not in ("bool", "boolean", "free_text"):
+            _ev_pages = _find_source_pages(answer, context_pages, answer_type)
+            _existing = {(p["doc_id"], p["page_number"]) for p in source_pages}
+            for ep in _ev_pages:
+                if (ep["doc_id"], ep["page_number"]) not in _existing:
+                    source_pages.append(ep)
     else:
         source_pages = _find_source_pages(answer, context_pages, answer_type)
 
@@ -1226,6 +1236,7 @@ def answer_with_llm(
     # For comparison questions: deterministic page selection using doc routing.
     # Gold expects 1 page per case (usually page 1 — title/header with parties/dates).
     # Use corpus_pages for doc routing to find each case's primary document.
+    _needs_all_docs = False
     if is_comparison:
         _case_refs_q = re.findall(r"[A-Z]{2,5}\s+\d{3}/\d{4}", question)
         if _case_refs_q and corpus_pages:
@@ -1234,32 +1245,47 @@ def answer_with_llm(
             _page_lk = article_index.get("page_lookup", {}) if article_index else {}
             _cmp_pages: list[dict] = []
             _cmp_docs_used: set[str] = set()
+            # Detect "all documents" / "full case files" questions → need ALL docs per case
+            _needs_all_docs = bool(re.search(
+                r"all documents|full case files|every document|title.?pages? of all",
+                question, re.IGNORECASE,
+            ))
             for cr in _case_refs_q:
                 cr_norm = cr.upper().replace("  ", " ")
-                _target_doc = _doc_route["case"].get(cr_norm)
-                if _target_doc and _target_doc not in _cmp_docs_used:
-                    # Get page 1 of this doc (title page with parties/judge/date)
-                    p1 = _page_lk.get((_target_doc, 1))
-                    if p1:
-                        _cmp_pages.append(p1)
-                        _cmp_docs_used.add(_target_doc)
-                    else:
-                        # Fallback: find page 1 in corpus
-                        for cp in corpus_pages:
-                            if cp["doc_id"] == _target_doc and cp["page_number"] == 1:
+                if _needs_all_docs:
+                    # Find ALL docs for this case in corpus
+                    _cr_no_space = cr_norm.replace(" ", "")
+                    for cp in corpus_pages:
+                        if cp["page_number"] == 1 and cp["doc_id"] not in _cmp_docs_used:
+                            if _cr_no_space in cp.get("text", "").replace(" ", ""):
                                 _cmp_pages.append(cp)
-                                _cmp_docs_used.add(_target_doc)
-                                break
+                                _cmp_docs_used.add(cp["doc_id"])
+                else:
+                    _target_doc = _doc_route["case"].get(cr_norm)
+                    if _target_doc and _target_doc not in _cmp_docs_used:
+                        p1 = _page_lk.get((_target_doc, 1))
+                        if p1:
+                            _cmp_pages.append(p1)
+                            _cmp_docs_used.add(_target_doc)
+                        else:
+                            for cp in corpus_pages:
+                                if cp["doc_id"] == _target_doc and cp["page_number"] == 1:
+                                    _cmp_pages.append(cp)
+                                    _cmp_docs_used.add(_target_doc)
+                                    break
             if len(_cmp_pages) >= 2:
-                # Also add page 2 of each case doc for better recall.
-                # β=2.5 means missing a gold page costs 6.25x more than an extra page.
-                # Judge names, dates, amounts often appear on page 2 as well.
-                _cmp_p2 = []
-                for _cp in _cmp_pages:
-                    p2 = _page_lk.get((_cp["doc_id"], 2))
-                    if p2:
-                        _cmp_p2.append(p2)
-                source_pages = _cmp_pages + _cmp_p2
+                # For free_text/name comparisons: add page 2 for better recall.
+                # For boolean/number: page 1 (title page) usually has judge/party info.
+                # Adding extra pages costs G=0.121 per extra, missing costs G=0.463.
+                if answer_type == "free_text":
+                    _cmp_p2 = []
+                    for _cp in _cmp_pages:
+                        p2 = _page_lk.get((_cp["doc_id"], 2))
+                        if p2:
+                            _cmp_p2.append(p2)
+                    source_pages = _cmp_pages + _cmp_p2
+                else:
+                    source_pages = _cmp_pages
             elif _cmp_pages:
                 # One case found via routing, add CITE pages for the other
                 _existing = {(p["doc_id"], p["page_number"]) for p in _cmp_pages}
@@ -1290,7 +1316,14 @@ def answer_with_llm(
 
     # Final page cap: non-comparison single-doc questions typically need 1-2 pages.
     # Article questions handled by early return above; this is for case/other Qs.
-    if is_comparison:
+    if _needs_all_docs:
+        # "All documents" questions: gold expects ALL doc title pages cited.
+        # Use high cap to avoid cutting legitimate docs.
+        _MAX_CITED = {
+            "bool": 8, "boolean": 8, "number": 8, "date": 8,
+            "name": 8, "names": 8, "free_text": 10,
+        }
+    elif is_comparison:
         _MAX_CITED = {
             "bool": 4, "boolean": 4, "number": 3, "date": 3,
             "name": 4, "names": 3, "free_text": 5,

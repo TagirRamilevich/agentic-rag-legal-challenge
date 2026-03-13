@@ -241,7 +241,8 @@ def extract_name(
     q_lower = question.lower()
 
     # For "which case has earlier/later date" comparison questions, use structured extraction
-    if re.search(r"\b(earlier|later|first|which case|which document)\b.*\b(date|issue)", q_lower):
+    if re.search(r"\b(earlier|later|first|which case|which document)\b.*\b(date|issue)|"
+                 r"\b(date|issue)\b.*\b(earlier|later|first)\b", q_lower):
         result, used = _extract_comparison_date_name(pages, question)
         if result is not None:
             return result, used
