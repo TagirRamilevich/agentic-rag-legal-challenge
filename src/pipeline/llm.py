@@ -163,8 +163,9 @@ def _call(
 
     except Exception as e:
         err_str = str(e)
-        # Detect permanent errors (spending limit, auth) → disable provider for session
-        if "usage limits" in err_str or "API key" in err_str or "authentication" in err_str.lower():
+        # Detect permanent errors (spending limit, auth, forbidden) → disable provider for session
+        if ("usage limits" in err_str or "API key" in err_str or "authentication" in err_str.lower()
+                or "forbidden" in err_str.lower() or "not allowed" in err_str.lower()):
             _PROVIDER_DISABLED.add(p)
             print(f"  LLM provider '{p}' disabled for session: {err_str[:100]}")
             # Try next provider immediately
@@ -1178,26 +1179,42 @@ def answer_with_llm(
     # For non-comparison: restrict to primary document
     if not is_comparison and len(source_pages) > 1:
         _target_doc_ids: set[str] = set()
+        _search_corpus = corpus_pages if corpus_pages else _all_pages
         _case_refs = re.findall(r"[A-Z]{2,5}\s+\d{3}/\d{4}", question)
         if len(_case_refs) == 1:
             _target_ref = _case_refs[0].replace(" ", "")
             for cp in context_pages:
                 if _target_ref in cp.get("text", "").replace(" ", ""):
                     _target_doc_ids.add(cp["doc_id"])
+        # Strategy 2: law name → match page 1 title
         if not _target_doc_ids:
             _law_m = re.search(
                 r"\b(?:the\s+)?((?:Operating|Employment|Trust|Foundations?|"
                 r"General Partnership|Limited Liability Partnership|"
-                r"Common Reporting Standard|Insolvency|Companies|"
-                r"Application of Civil)\s+Law)\b",
+                r"Common Reporting Standard|Insolvency|Companies|Personal Property|"
+                r"Application of Civil)\s+(?:Law|Standard))\b",
                 question, re.IGNORECASE,
             )
             if _law_m:
                 _law_name = _law_m.group(1).lower()
-                for cp in _all_pages:
+                for cp in _search_corpus:
                     if cp["page_number"] == 1:
-                        if _law_name in cp.get("text", "")[:300].lower():
+                        if _law_name in cp.get("text", "")[:500].lower():
                             _target_doc_ids.add(cp["doc_id"])
+        # Strategy 3: "DIFC Law No. N of YYYY" → match page 1
+        if not _target_doc_ids:
+            _law_no_m = re.search(
+                r"\bLaw\s+No\.?\s*(\d+)\s+of\s+(\d{4})\b", question, re.IGNORECASE,
+            )
+            if _law_no_m:
+                _law_num = _law_no_m.group(1)
+                _law_year = _law_no_m.group(2)
+                _law_no_pat = re.compile(
+                    rf"Law\s+No\.?\s*{_law_num}\s+of\s+{_law_year}", re.IGNORECASE
+                )
+                for cp in _search_corpus:
+                    if cp["page_number"] == 1 and _law_no_pat.search(cp.get("text", "")[:500]):
+                        _target_doc_ids.add(cp["doc_id"])
         if _target_doc_ids:
             _filtered = [p for p in source_pages if p["doc_id"] in _target_doc_ids]
             if _filtered:
