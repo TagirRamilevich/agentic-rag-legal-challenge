@@ -736,19 +736,30 @@ def _detect_specific_page(question: str, source_pages: list[dict],
             last = max(doc_pages, key=lambda p: p["page_number"])
             return [last]
 
-    # "first page" / "title page" / "cover page" → page 1 from each doc
-    if any(kw in q_lower for kw in ["first page", "title page", "cover page"]):
+    # "first page" / "title page" / "cover page" / "header" / "caption" → page 1 from each doc
+    if any(kw in q_lower for kw in ["first page", "title page", "cover page", "header", "caption"]):
         seen_docs: set[str] = set()
         result_pages: list[dict] = []
+        # Start with docs from source_pages
         for p in source_pages:
             if p["doc_id"] not in seen_docs:
-                # Find page 1 of this doc in search_pool
                 p1 = next((pp for pp in search_pool if pp["doc_id"] == p["doc_id"] and pp["page_number"] == 1), None)
                 if not p1 and p["page_number"] == 1:
-                    p1 = p  # source_page is already page 1
+                    p1 = p
                 if p1:
                     result_pages.append(p1)
                     seen_docs.add(p["doc_id"])
+        # For "each document" / "header/caption" with case reference: also search
+        # search_pool for additional docs from the same case (multi-doc cases).
+        if "each document" in q_lower or "header" in q_lower or "caption" in q_lower:
+            _case_refs = re.findall(r"[A-Z]{2,5}\s+\d{3}/\d{4}", question)
+            for cr in _case_refs:
+                cr_nospace = cr.replace(" ", "")
+                for pp in search_pool:
+                    if pp["doc_id"] not in seen_docs and pp["page_number"] == 1:
+                        if cr_nospace in pp.get("text", "").replace(" ", ""):
+                            result_pages.append(pp)
+                            seen_docs.add(pp["doc_id"])
         if result_pages:
             return result_pages
 
@@ -1351,13 +1362,16 @@ def answer_with_llm(
                             source_pages.append(cp)
                             break
 
-    # Page-specific questions
-    _specific_page = _detect_specific_page(question, source_pages, all_pages=pages)
+    # Page-specific questions: use corpus_pages if available for wider search
+    _sp_search = corpus_pages if corpus_pages else pages
+    _specific_page = _detect_specific_page(question, source_pages, all_pages=_sp_search)
     if _specific_page:
         source_pages = _specific_page
 
     # Final page cap: non-comparison single-doc questions typically need 1-2 pages.
     # Article questions handled by early return above; this is for case/other Qs.
+    # Override: if _detect_specific_page found multi-doc pages, use that count as cap.
+    _multi_doc_override = len(_specific_page) if _specific_page and len(_specific_page) > 2 else 0
     if _needs_all_docs:
         # "All documents" questions: gold expects ALL doc title pages cited.
         # Use high cap to avoid cutting legitimate docs.
@@ -1376,6 +1390,9 @@ def answer_with_llm(
             "name": 2, "names": 2, "free_text": 3,
         }
     _cap = _MAX_CITED.get(answer_type, 3)
+    # Multi-doc specific-page override: don't cap below the doc count
+    if _multi_doc_override > _cap:
+        _cap = _multi_doc_override
     if len(source_pages) > _cap:
         source_pages = source_pages[:_cap]
 
