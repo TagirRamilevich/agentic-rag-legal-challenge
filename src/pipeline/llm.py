@@ -1251,7 +1251,15 @@ def answer_with_llm(
                                 _cmp_docs_used.add(_target_doc)
                                 break
             if len(_cmp_pages) >= 2:
-                source_pages = _cmp_pages  # deterministic: page 1 per case
+                # Also add page 2 of each case doc for better recall.
+                # β=2.5 means missing a gold page costs 6.25x more than an extra page.
+                # Judge names, dates, amounts often appear on page 2 as well.
+                _cmp_p2 = []
+                for _cp in _cmp_pages:
+                    p2 = _page_lk.get((_cp["doc_id"], 2))
+                    if p2:
+                        _cmp_p2.append(p2)
+                source_pages = _cmp_pages + _cmp_p2
             elif _cmp_pages:
                 # One case found via routing, add CITE pages for the other
                 _existing = {(p["doc_id"], p["page_number"]) for p in _cmp_pages}
