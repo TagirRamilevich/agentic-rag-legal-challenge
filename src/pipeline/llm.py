@@ -1412,7 +1412,7 @@ def answer_with_llm(
         if not used_pages and context_pages:
             used_pages = context_pages[:1]
         # Cap free_text pages
-        _ft_cap = 4 if is_comparison else 3
+        _ft_cap = 5 if is_comparison else 4
         if len(used_pages) > _ft_cap:
             used_pages = used_pages[:_ft_cap]
         total_ms2 = max(1, int((time.perf_counter() - _t0) * 1000))
@@ -1586,13 +1586,40 @@ def answer_with_llm(
         answer, answer_type, question, _candidate_pool, context_pages
     )
 
+    # Boolean recall floor: ensure at least 2 pages for boolean questions.
+    # β=2.5 means missing a gold page costs 6.25x more than an extra page.
+    if answer_type in ("bool", "boolean") and len(source_pages) < 2:
+        _src_keys_b = {(p["doc_id"], p["page_number"]) for p in source_pages}
+        # Add CITE pages first
+        if cited_indices:
+            for i in cited_indices:
+                if i < len(context_pages):
+                    cp = context_pages[i]
+                    if (cp["doc_id"], cp["page_number"]) not in _src_keys_b:
+                        source_pages.append(cp)
+                        _src_keys_b.add((cp["doc_id"], cp["page_number"]))
+                        if len(source_pages) >= 2:
+                            break
+        # Then article pages
+        if len(source_pages) < 2 and _article_grounding_pages:
+            for ap in _article_grounding_pages:
+                if (ap["doc_id"], ap["page_number"]) not in _src_keys_b:
+                    source_pages.append(ap)
+                    break
+        # Finally context pages
+        if len(source_pages) < 2 and len(context_pages) >= 2:
+            for cp in context_pages:
+                if (cp["doc_id"], cp["page_number"]) not in _src_keys_b:
+                    source_pages.append(cp)
+                    break
+
     # For typed answers (number/date/name): merge CITE pages AND article pages
     # with evidence pages. β=2.5 means missing a gold page costs 6.25x more than
     # including an extra page. CITE pages carry LLM judgment; article pages carry
     # the referenced article text (often the gold standard for article questions).
     if answer_type not in ("bool", "boolean", "free_text"):
         _src_keys = {(p["doc_id"], p["page_number"]) for p in source_pages}
-        # Add CITE pages
+        # Add CITE pages (β=2.5: recall >> precision, include all CITE pages)
         if cited_indices:
             for i in cited_indices:
                 if i < len(context_pages):
@@ -1601,17 +1628,30 @@ def answer_with_llm(
                     if _k not in _src_keys:
                         source_pages.append(cp)
                         _src_keys.add(_k)
-                        if len(source_pages) >= 2:
+                        if len(source_pages) >= 3:
                             break
-        # Add article page if question references an Article and it's not yet cited
-        if len(source_pages) < 2 and _article_grounding_pages:
+        # Add article pages (article text is often the gold standard)
+        if len(source_pages) < 3 and _article_grounding_pages:
             for ap in _article_grounding_pages:
                 _k = (ap["doc_id"], ap["page_number"])
                 if _k not in _src_keys:
                     source_pages.append(ap)
                     _src_keys.add(_k)
-                    if len(source_pages) >= 2:
+                    if len(source_pages) >= 3:
                         break
+
+    # Article continuation: articles often span pages. Add the next page from the
+    # same doc if we have article grounding pages and room for more.
+    if _article_grounding_pages and len(source_pages) < 3:
+        _page_lk_art = article_index.get("page_lookup", {}) if article_index else {}
+        _cont_keys = {(p["doc_id"], p["page_number"]) for p in source_pages}
+        for ap in _article_grounding_pages:
+            next_key = (ap["doc_id"], ap["page_number"] + 1)
+            if next_key not in _cont_keys:
+                next_p = _page_lk_art.get(next_key)
+                if next_p:
+                    source_pages.append(next_p)
+                    break  # one continuation page is enough
 
     # For comparison questions: ensure both cases have representation via doc routing.
     # Use evidence-verified pages as base, then ensure each case has at least 1 page.
@@ -1672,7 +1712,7 @@ def answer_with_llm(
     elif is_comparison:
         _cap = 4  # 2 cases × up to 2 pages
     else:
-        _cap = 2  # evidence-verified: 1-2 pages
+        _cap = 3  # evidence-verified: β=2.5 favors recall, allow up to 3 pages
     if _multi_doc_override > _cap:
         _cap = _multi_doc_override
     if len(source_pages) > _cap:
