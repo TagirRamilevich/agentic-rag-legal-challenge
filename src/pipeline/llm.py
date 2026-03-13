@@ -1153,6 +1153,9 @@ def answer_with_llm(
             from src.pipeline.answer import answer_question
             det_ans, det_pages = answer_question(question_data, context_pages)
             if det_ans is not None:
+                # Use article grounding pages for citations when available (more precise)
+                if _article_grounding_pages and not is_comparison:
+                    det_pages = list(_article_grounding_pages)
                 return det_ans, det_pages, ttft_ms, total_ms_final, in_tok, out_tok, model + "-det-fallback"
         return None, [], ttft_ms, total_ms_final, in_tok, out_tok, model
 

@@ -168,6 +168,39 @@ def main(phase: str, config_path: str = "configs/rag.yaml", skip_validate: bool 
                                 final_pages.insert(0, cp)
                                 break
 
+        # Single-case guarantee: ensure ALL docs for a case are in TOP positions.
+        # Some cases have multiple docs (e.g., order + judgment). The LLM only sees
+        # max_pages (typically 3-5), so pages beyond that are invisible. Promote at
+        # least one page from each case doc into the first few positions.
+        if not is_cmp:
+            _single_case_refs = re.findall(r"[A-Z]{2,5}\s+\d{3}/\d{4}", q["question"])
+            if len(_single_case_refs) == 1:
+                cr_norm = _single_case_refs[0].upper().replace("  ", " ")
+                _all_case_docs = set()
+                for cp in pages:
+                    if cr_norm.replace(" ", "") in cp.get("text", "").replace(" ", ""):
+                        _all_case_docs.add(cp["doc_id"])
+                # For each case doc, ensure pages are in top positions (within LLM max_pages).
+                # Promote up to 2 pages from underrepresented docs.
+                # Use top 3 to match the typical max_pages for number/name/bool types.
+                _top4_docs = {p["doc_id"] for p in final_pages[:3]}
+                for _cd in _all_case_docs:
+                    if _cd not in _top4_docs:
+                        # Collect ALL pages from this doc in final_pages
+                        _doc_pages = [(idx, p) for idx, p in enumerate(final_pages) if p["doc_id"] == _cd]
+                        if _doc_pages:
+                            # Promote top 2 pages (by rerank order) to positions 1-2
+                            for rank, (idx, p) in enumerate(_doc_pages[:2]):
+                                # Adjust idx for previous removals
+                                cur_idx = next(i for i, fp in enumerate(final_pages) if fp is p)
+                                final_pages.pop(cur_idx)
+                                final_pages.insert(1 + rank, p)
+                        elif _cd in {cp["doc_id"] for cp in pages}:
+                            for cp in pages:
+                                if cp["doc_id"] == _cd and cp["page_number"] == 1:
+                                    final_pages.insert(1, cp)
+                                    break
+
         if use_llm:
             # Set t0 right before LLM call (exclude retrieval/rerank from TTFT)
             t0_llm = time.perf_counter()

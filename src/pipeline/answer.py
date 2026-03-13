@@ -119,14 +119,15 @@ def extract_number(
         for sent in _sentences(page["text"]):
             score = _relevance(sent, keywords)
             if score > best_score:
-                # Strip article/section sub-references before parsing
+                # Strip article/section sub-references before parsing to avoid
+                # extracting article numbers as answers (e.g. "Article 11(1)" → 11)
                 clean_sent = re.sub(
                     r"\b(?:Article|Section|Clause|Schedule|Part)\s+\d+(?:\(\w+\))*",
                     "", sent, flags=re.IGNORECASE,
                 )
+                # Also strip bare section-heading numbers (Operating Law format: "11\n(1)...")
+                clean_sent = re.sub(r"(?:^|\n)\s*(\d+)\s*(?:\n|$)", " ", clean_sent)
                 val = parse_number(clean_sent)
-                if val is None:
-                    val = parse_number(sent)
                 if val is not None:
                     # Legal Q&A about counts/durations: always positive
                     if val < 0 and "-" not in sent:
