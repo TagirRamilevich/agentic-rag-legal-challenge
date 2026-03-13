@@ -1507,7 +1507,7 @@ def answer_with_llm(
     # with evidence pages. β=2.5 means missing a gold page costs 6.25x more than
     # including an extra page. CITE pages carry LLM judgment; article pages carry
     # the referenced article text (often the gold standard for article questions).
-    if answer_type not in ("bool", "boolean", "free_text", "names"):
+    if answer_type not in ("bool", "boolean", "free_text"):
         _src_keys = {(p["doc_id"], p["page_number"]) for p in source_pages}
         # Add CITE pages
         if cited_indices:

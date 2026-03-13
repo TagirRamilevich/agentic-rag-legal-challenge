@@ -4,7 +4,7 @@ data_dir: data
 cache_dir: .cache
 submission_path: submission.json
 code_archive_path: code_archive.zip
-architecture_summary: "BM25+embedding hybrid RRF fusion → cross-encoder rerank(comparison) → Claude Sonnet(free_text)/Haiku(extractive) streaming. Doc routing index maps case/law refs to doc_ids. Dual-query retrieval for comparisons with round-robin doc diversity. Article page pinning. CITE+adjacent page grounding for high recall(β=2.5). CoT for comparison booleans. Context distillation preserves case headers, articles, court orders."
+architecture_summary: "BM25+embedding hybrid RRF fusion → cross-encoder rerank → Claude Sonnet(free_text)/Haiku(extractive) streaming. Doc routing maps case/law refs to doc_ids. Evidence-span grounding: CITE+article+verification pages merged for high recall(β=2.5). Pre-LLM fast paths for monetary claims, structured comparisons. Post-LLM verification for number/article confusion, generic names, territorial scope. CoT for comparison booleans. Context distillation."
 
 retrieval:
   top_k_bm25: 20
