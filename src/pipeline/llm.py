@@ -855,22 +855,38 @@ def answer_with_llm(
         if _target_doc_for_art:
             _art_key = (_target_doc_for_art, _art_idx_num)
             _all_mentions = article_index.get("all", {})
-            # Merge definitions + all mentions, deduplicate, sort ascending.
-            # Definitions alone can have false positives (schedule items "N.").
-            # All mentions include inline refs ("Article N(1)") which are on
-            # the actual article content page. Lowest page numbers are best
-            # since articles appear sequentially in law documents.
-            _def_page_nums = sorted(set(
-                _art_defs.get(_art_key, []) + _all_mentions.get(_art_key, [])
-            ))
+            # Prioritize DEFINITION pages over "all" mentions.
+            # "all" mentions include early cross-refs (e.g. Art 9 referenced
+            # on page 6 but actually defined on page 11). Sorting merged pages
+            # by number picks those early refs first, missing the real content.
+            _raw_defs = sorted(set(_art_defs.get(_art_key, [])))
+            _raw_all = sorted(set(_all_mentions.get(_art_key, [])))
+            # Use definitions first (up to 3), then supplement with "all" pages
+            # that aren't already covered. This ensures content pages are selected.
+            _def_set = set(_raw_defs)
+            _supplement = [p for p in _raw_all if p not in _def_set]
+            _def_page_nums = (_raw_defs[:3] + _supplement)[:5]  # generous pool
             if _def_page_nums:
-                # Fill gaps between definition pages (continuation pages).
-                # E.g., Art 7 with defs on pages [5, 7] → include page 6.
+                _base_pages = _raw_defs[:3] if _raw_defs else _raw_all[:3]
+                # If question references a LATE sub-clause letter (f-z),
+                # check if article content starts before the first definition page.
+                # Art 7(3)(j) starts on page 5 but "7." heading is on page 7.
+                # Early sub-clauses (a-e) are on the first def page; only late ones
+                # overflow to preceding pages.
+                _q_has_subclause = bool(re.search(
+                    r"\bArticle\s+\d+(?:\(\d+\))?\([f-z]\)",
+                    question, re.IGNORECASE,
+                ))
+                if _q_has_subclause and _base_pages and _raw_all:
+                    _first_def = _base_pages[0]
+                    _pre_pages = [p for p in _raw_all if p < _first_def and _first_def - p <= 2]
+                    if _pre_pages:
+                        _base_pages = [_pre_pages[-1]] + _base_pages
                 _expanded_pages: list[int] = []
-                for i, pn in enumerate(_def_page_nums[:3]):
+                for i, pn in enumerate(_base_pages[:4]):  # cap at 4 base
                     _expanded_pages.append(pn)
-                    if i + 1 < len(_def_page_nums):
-                        _next_def = _def_page_nums[i + 1]
+                    if i + 1 < len(_base_pages):
+                        _next_def = _base_pages[i + 1]
                         # Fill gap pages (max 1 gap page between consecutive defs)
                         if _next_def - pn == 2:
                             _expanded_pages.append(pn + 1)
