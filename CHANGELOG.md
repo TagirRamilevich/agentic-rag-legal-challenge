@@ -121,6 +121,43 @@ Detailed log of all pipeline iterations with metrics, for post-competition publi
 
 ### Key improvement: Det 0.929 → 0.971 (+0.042), new best total
 
+## v11 — 0.667 (2026-03-19 08:39)
+| Det | Asst | G | T | TTFT | F | **Total** |
+|-----|------|---|---|------|---|-----------|
+| 0.971 | 0.713 | 0.722 | 0.996 | — | 1.037 | **0.667** |
+
+- Aggressive grounding recall push: raised all page caps, recall floors, evidence page counts
+- Avg pages per question: 2.08 → 2.97 (+43%)
+- **G dropped 0.781→0.722** — extra pages were noise, not gold
+- Asst improved 0.687→0.713 from more LLM context pages
+- Lesson: "more pages" ≠ "better grounding". Precision matters even with β=2.5
+
+## v12 — 0.696 (2026-03-19 08:49)
+| Det | Asst | G | T | TTFT | F | **Total** |
+|-----|------|---|---|------|---|-----------|
+| 0.971 | 0.687 | 0.760 | 0.996 | 859ms | 1.039 | **0.696** |
+
+- Reverted most v11 grounding changes, kept: LLM context increase, reranker cap 50, top_k_rerank 8
+- G partially recovered (0.722→0.760) but still below v10 (0.781)
+- Remaining LLM context changes + CITE instruction still hurting G precision
+
+## v13 — 0.756 (2026-03-19 10:13) ← current best
+| Det | Asst | G | T | TTFT | F | **Total** |
+|-----|------|---|---|------|---|-----------|
+| 0.971 | 0.707 | 0.825 | 0.996 | 1225ms | 1.031 | **0.756** |
+
+### Changes (precision-focused, no page count inflation):
+1. **Candidate pool reorder**: article index pages checked BEFORE CITE pages in evidence verification
+   - Article definition pages are most likely gold for law-article questions
+2. **Evidence verification improvement**: for number/date questions, prefer pages with BOTH the answer value AND the article reference
+   - Prevents selecting a page that mentions "6" in a different context when Article 19 defines "six (6) months"
+3. **Date comparison fast path**: include page 1+2 from each case doc (was: only page 1)
+   - Page 1 = header (parties, judge), page 2 = order/judgment start (Date of Issue)
+   - 11/12 comparison name questions went from 2p→4p
+
+### Key improvement: G 0.781→0.825 (+0.044), new best total 0.756
+### Lesson: precision > volume for grounding. Finding the RIGHT page matters more than including more pages.
+
 ---
 
 ## Score progression
@@ -136,6 +173,9 @@ v7  █████████████████████████�
 v8  ███████████████████████████████████           0.704
 v9  ███████████████████████████████               0.626
 v10 ████████████████████████████████████          0.716
+v11 █████████████████████████████████             0.667
+v12 ███████████████████████████████████           0.696
+v13 ██████████████████████████████████████        0.756
 ```
 
 ## Metric progression
@@ -151,6 +191,9 @@ v10 █████████████████████████�
 | v8 | 0.929 | 0.713 | 0.788 | 0.996 | 937  | 1.038 | 0.704 |
 | v9 | 0.957 | 0.680 | 0.690 | 0.996 | 836  | 1.041 | 0.626 |
 | v10 | 0.971 | 0.687 | 0.781 | 0.996 | — | 1.040 | 0.716 |
+| v11 | 0.971 | 0.713 | 0.722 | 0.996 | — | 1.037 | 0.667 |
+| v12 | 0.971 | 0.687 | 0.760 | 0.996 | 859 | 1.039 | 0.696 |
+| v13 | 0.971 | 0.707 | 0.825 | 0.996 | 1225 | 1.031 | 0.756 |
 
 ## Key architectural decisions
 - **BM25+embeddings hybrid** with RRF fusion (not pure dense)

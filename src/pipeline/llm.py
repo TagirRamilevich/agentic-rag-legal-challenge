@@ -821,25 +821,52 @@ def _verify_evidence_pages(
                 break
         return list(seen.values()) if len(seen) >= 2 else candidate_pages[:1]
 
-    # For number: find the page containing the numeric value
+    # For number: find the page containing the numeric value.
+    # Prefer pages that also contain the article reference (more precise match).
     if answer_type == "number":
         variants = _number_search_variants(answer)
         if variants:
+            art_m = re.search(r"Article\s+(\d+)", question, re.IGNORECASE)
+            art_pat = re.compile(
+                rf"\bArticle\s+{art_m.group(1)}\b|(?:^|\n)\s*{art_m.group(1)}\.\s",
+                re.IGNORECASE,
+            ) if art_m else None
+            best_match = None
             for p in candidate_pages:
                 text = p.get("text", "")
                 for v in variants:
                     if re.search(re.escape(v), text, re.IGNORECASE):
-                        return [p]
+                        # If page also has the article reference, prefer it
+                        if art_pat and art_pat.search(text):
+                            return [p]
+                        if best_match is None:
+                            best_match = p
+                        break
+            if best_match:
+                return [best_match]
         return candidate_pages[:1]
 
-    # For date: find the page containing the date
+    # For date: find the page containing the date.
+    # Prefer pages with article reference for precision.
     if answer_type == "date":
         variants = _date_search_variants(str(answer))
+        art_m = re.search(r"Article\s+(\d+)", question, re.IGNORECASE)
+        art_pat = re.compile(
+            rf"\bArticle\s+{art_m.group(1)}\b|(?:^|\n)\s*{art_m.group(1)}\.\s",
+            re.IGNORECASE,
+        ) if art_m else None
+        best_match = None
         for p in candidate_pages:
             text = p.get("text", "")
             for v in variants:
                 if v in text:
-                    return [p]
+                    if art_pat and art_pat.search(text):
+                        return [p]
+                    if best_match is None:
+                        best_match = p
+                    break
+        if best_match:
+            return [best_match]
         return candidate_pages[:1]
 
     # For name: find the page containing the name
@@ -1008,11 +1035,13 @@ def answer_with_llm(
                         cr_norm = cr.upper().replace("  ", " ")
                         _td = _doc_route_det["case"].get(cr_norm)
                         if _td:
-                            p1 = _page_lk_det.get((_td, 1))
-                            if not p1:
-                                p1 = next((cp for cp in corpus_pages if cp["doc_id"] == _td and cp["page_number"] == 1), None)
-                            if p1:
-                                _routing_pages.append(p1)
+                            # Include pages 1+2: page 1 has parties/header, page 2 has date/order
+                            for _pn in (1, 2):
+                                _pp = _page_lk_det.get((_td, _pn))
+                                if not _pp:
+                                    _pp = next((cp for cp in corpus_pages if cp["doc_id"] == _td and cp["page_number"] == _pn), None)
+                                if _pp:
+                                    _routing_pages.append(_pp)
                     if len(_routing_pages) >= 2:
                         _grnd_pages = _routing_pages
                 _elapsed = max(1, int((time.perf_counter() - _t0) * 1000))
@@ -1566,16 +1595,18 @@ def answer_with_llm(
             _seen_keys.add(key)
             _candidate_pool.append(p)
 
-    # Source 1: CITE-based pages from LLM (highest signal)
+    # Source 1: Article index pages first for article questions (most precise).
+    # Article definition pages are the most likely gold pages for law-article questions.
+    # Checking them first in _verify_evidence_pages improves precision.
+    if _article_grounding_pages:
+        for p in _article_grounding_pages:
+            _add_candidate(p)
+
+    # Source 2: CITE-based pages from LLM
     if cited_indices:
         for i in cited_indices:
             if i < len(context_pages):
                 _add_candidate(context_pages[i])
-
-    # Source 2: Article index pages (candidate, not override)
-    if _article_grounding_pages:
-        for p in _article_grounding_pages:
-            _add_candidate(p)
 
     # Source 3: All context pages as fallback
     for p in context_pages:
@@ -1697,6 +1728,23 @@ def answer_with_llm(
                         if _best_p:
                             source_pages.append(_best_p)
                             _source_doc_ids.add(_target_doc)
+
+    # For comparison case questions: ensure page 1+2 from each case doc for stable grounding.
+    # Case doc page 1 has parties/judge/date, page 2 often has order/judgment start.
+    # Without this, LLM CITE non-determinism causes random page losses.
+    if is_comparison and not _needs_all_docs:
+        _cmp_src_keys = {(p["doc_id"], p["page_number"]) for p in source_pages}
+        _cmp_page_lk = article_index.get("page_lookup", {}) if article_index else {}
+        for p in list(source_pages):
+            if p["page_number"] == 1:
+                p2_key = (p["doc_id"], 2)
+                if p2_key not in _cmp_src_keys:
+                    p2 = _cmp_page_lk.get(p2_key)
+                    if not p2 and corpus_pages:
+                        p2 = next((cp for cp in corpus_pages if cp["doc_id"] == p["doc_id"] and cp["page_number"] == 2), None)
+                    if p2:
+                        source_pages.append(p2)
+                        _cmp_src_keys.add(p2_key)
 
     # Page-specific questions: use corpus_pages if available for wider search
     _sp_search = corpus_pages if corpus_pages else pages
