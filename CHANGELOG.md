@@ -171,6 +171,22 @@ Detailed log of all pipeline iterations with metrics, for post-competition publi
 ### Key improvement: G 0.825→0.862 (+0.037), Asst 0.707→0.720, new best total 0.791
 ### Lesson: every extra non-gold page costs ~0.10-0.22 in per-question F-beta. Precision refinements stack.
 
+## v15 — 0.749 (2026-03-19 12:31) — REGRESSION
+| Det | Asst | G | T | TTFT | F | **Total** |
+|-----|------|---|---|------|---|-----------|
+| 0.929 | 0.640 | 0.862 | 0.996 | — | 1.037 | **0.749** |
+
+### Changes that HURT:
+1. **Judge overlap check** — flipped 2 booleans False→True, BOTH WRONG. Gold considers "Assistant Registrar" NOT a judge.
+2. **Adversarial free_text** — replaced generic fallback with specific DIFC explanations. Gold expects the generic fallback text. Custom answers scored LOWER.
+3. **Free_text prompt changes** — "1-3 sentences" and different wording hurt Asst quality (0.720→0.640).
+
+### Lessons:
+- Do NOT override adversarial fallback — the generic "no information" IS the gold answer
+- Do NOT add post-LLM boolean overrides without strong evidence — flips are dangerous
+- Do NOT change free_text prompt wording that's been working — Asst is sensitive to prompt changes
+- **REVERTED to v14 code for finals**
+
 ---
 
 ## Score progression
@@ -190,6 +206,7 @@ v11 █████████████████████████�
 v12 ███████████████████████████████████           0.696
 v13 ██████████████████████████████████████        0.756
 v14 ████████████████████████████████████████      0.791
+v15 █████████████████████████████████████         0.749
 ```
 
 ## Metric progression
@@ -209,6 +226,7 @@ v14 █████████████████████████�
 | v12 | 0.971 | 0.687 | 0.760 | 0.996 | 859 | 1.039 | 0.696 |
 | v13 | 0.971 | 0.707 | 0.825 | 0.996 | 1225 | 1.031 | 0.756 |
 | v14 | 0.971 | 0.720 | 0.862 | 0.996 | — | 1.029 | 0.791 |
+| v15 | 0.929 | 0.640 | 0.862 | 0.996 | — | 1.037 | 0.749 |
 
 ## Key architectural decisions
 - **BM25+embeddings hybrid** with RRF fusion (not pure dense)
