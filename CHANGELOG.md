@@ -158,6 +158,19 @@ Detailed log of all pipeline iterations with metrics, for post-competition publi
 ### Key improvement: G 0.781→0.825 (+0.044), new best total 0.756
 ### Lesson: precision > volume for grounding. Finding the RIGHT page matters more than including more pages.
 
+## v14 — 0.791 (2026-03-19 11:24) ← current best
+| Det | Asst | G | T | TTFT | F | **Total** |
+|-----|------|---|---|------|---|-----------|
+| 0.971 | 0.720 | 0.862 | 0.996 | — | 1.029 | **0.791** |
+
+### Changes (further precision refinements on v13):
+1. **Smart article continuation**: only add next page if it continues the SAME article (skip if next page starts a new Article N+1)
+2. **Conditional comparison page 2**: only add page 2 for date comparison name questions, not for party/judge boolean comparisons (page 1 alone has all party/judge info)
+3. **Reduced non-comparison cap 3→2**: most article questions have gold=1-2 pages; the 3rd page was usually noise from adjacent articles
+
+### Key improvement: G 0.825→0.862 (+0.037), Asst 0.707→0.720, new best total 0.791
+### Lesson: every extra non-gold page costs ~0.10-0.22 in per-question F-beta. Precision refinements stack.
+
 ---
 
 ## Score progression
@@ -176,6 +189,7 @@ v10 █████████████████████████�
 v11 █████████████████████████████████             0.667
 v12 ███████████████████████████████████           0.696
 v13 ██████████████████████████████████████        0.756
+v14 ████████████████████████████████████████      0.791
 ```
 
 ## Metric progression
@@ -194,6 +208,7 @@ v13 █████████████████████████�
 | v11 | 0.971 | 0.713 | 0.722 | 0.996 | — | 1.037 | 0.667 |
 | v12 | 0.971 | 0.687 | 0.760 | 0.996 | 859 | 1.039 | 0.696 |
 | v13 | 0.971 | 0.707 | 0.825 | 0.996 | 1225 | 1.031 | 0.756 |
+| v14 | 0.971 | 0.720 | 0.862 | 0.996 | — | 1.029 | 0.791 |
 
 ## Key architectural decisions
 - **BM25+embeddings hybrid** with RRF fusion (not pure dense)

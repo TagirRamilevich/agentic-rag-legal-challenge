@@ -1671,9 +1671,11 @@ def answer_with_llm(
                     if len(source_pages) >= 3:
                         break
 
-    # Article continuation: articles often span pages. Add the next page from the
-    # same doc if we have article grounding pages and room for more.
-    if _article_grounding_pages and len(source_pages) < 3:
+    # Article continuation: add the next page only if it continues the SAME article.
+    # Skip if next page starts a new article (e.g., "Article 15" when we want Art 14).
+    _q_art_cont = re.search(r"\bArticle\s+(\d+)", question, re.IGNORECASE)
+    if _article_grounding_pages and len(source_pages) < 3 and _q_art_cont:
+        _cont_art_num = _q_art_cont.group(1)
         _page_lk_art = article_index.get("page_lookup", {}) if article_index else {}
         _cont_keys = {(p["doc_id"], p["page_number"]) for p in source_pages}
         for ap in _article_grounding_pages:
@@ -1681,8 +1683,13 @@ def answer_with_llm(
             if next_key not in _cont_keys:
                 next_p = _page_lk_art.get(next_key)
                 if next_p:
+                    _next_text = next_p.get("text", "")[:200]
+                    # Only add if next page doesn't start a DIFFERENT article
+                    _new_art = re.search(r"(?:^|\n)\s*Article\s+(\d+)\b", _next_text, re.IGNORECASE)
+                    if _new_art and _new_art.group(1) != _cont_art_num:
+                        continue  # skip — next page is a different article
                     source_pages.append(next_p)
-                    break  # one continuation page is enough
+                    break
 
     # For comparison questions: ensure both cases have representation via doc routing.
     # Use evidence-verified pages as base, then ensure each case has at least 1 page.
@@ -1729,10 +1736,13 @@ def answer_with_llm(
                             source_pages.append(_best_p)
                             _source_doc_ids.add(_target_doc)
 
-    # For comparison case questions: ensure page 1+2 from each case doc for stable grounding.
-    # Case doc page 1 has parties/judge/date, page 2 often has order/judgment start.
-    # Without this, LLM CITE non-determinism causes random page losses.
-    if is_comparison and not _needs_all_docs:
+    # For comparison date questions: ensure page 1+2 from each case doc.
+    # Date of Issue is often on page 2. Only for date/name comparison questions,
+    # NOT for party/judge boolean comparisons where page 1 alone suffices.
+    _is_date_comparison = is_comparison and answer_type == "name" and bool(
+        re.search(r"\b(earlier|later|first|date|issue)\b", question, re.IGNORECASE)
+    )
+    if _is_date_comparison and not _needs_all_docs:
         _cmp_src_keys = {(p["doc_id"], p["page_number"]) for p in source_pages}
         _cmp_page_lk = article_index.get("page_lookup", {}) if article_index else {}
         for p in list(source_pages):
@@ -1760,7 +1770,7 @@ def answer_with_llm(
     elif is_comparison:
         _cap = 4  # 2 cases × up to 2 pages
     else:
-        _cap = 3  # evidence-verified: β=2.5 favors recall, allow up to 3 pages
+        _cap = 2  # most article questions have gold=1-2 pages; 3rd page is usually noise
     if _multi_doc_override > _cap:
         _cap = _multi_doc_override
     if len(source_pages) > _cap:
