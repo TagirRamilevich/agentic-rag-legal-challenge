@@ -205,6 +205,27 @@ Detailed log of all pipeline iterations with metrics, for post-competition publi
 - T=1.000 (perfect), F=1.042 (good speed).
 - **Diagnosis needed**: retrieval precision, deterministic extraction coverage, grounding page selection.
 
+## Final v2 — 0.449 (2026-03-21 10:27)
+| Det | Asst | G | T | F | **Total** |
+|-----|------|---|---|---|-----------|
+| 0.709 | 0.644 | 0.631 | 1.000 | 1.033 | **0.449** |
+
+### Changes from v1:
+1. Law number regex fix (exclude fee/fine) → Det +0.013
+2. Free_text adversarial: cite top page → **G -0.016 (HURT!)**
+3. Case number leakage post-LLM check
+4. Consultation paper quoted title matching + CP routing
+5. Party count: Sonnet for party/names Qs, max_pages=5
+6. Doc diversity: cap 5 pages/doc in hybrid retrieval
+7. OCR for 2 empty scanned docs
+8. CP titles in doc routing index
+
+### Key lesson:
+- **Adding pages to adversarial/fallback answers HURTS G.** Evaluator gives G=1.0 for empty pages when gold is also empty. Adding wrong pages → G=0 on those questions.
+- Det fix (+0.013) was offset by G drop (-0.016) and F drop (-0.009) from Sonnet TTFT.
+- Net result: -0.008 (worse than v1).
+- 0 final submissions remaining.
+
 ---
 
 ## Score progression
@@ -228,6 +249,7 @@ v15 █████████████████████████�
 
 FINAL:
 F-v1 ███████████████████████                       0.457
+F-v2 ██████████████████████                        0.449
 ```
 
 ## Metric progression
@@ -249,6 +271,7 @@ F-v1 ███████████████████████      
 | v14 | 0.971 | 0.720 | 0.862 | 0.996 | — | 1.029 | 0.791 |
 | v15 | 0.929 | 0.640 | 0.862 | 0.996 | — | 1.037 | 0.749 |
 | **F-v1** | **0.696** | **0.637** | **0.647** | **1.000** | **—** | **1.042** | **0.457** |
+| **F-v2** | **0.709** | **0.644** | **0.631** | **1.000** | **—** | **1.033** | **0.449** |
 
 ## Key architectural decisions
 - **BM25+embeddings hybrid** with RRF fusion (not pure dense)
