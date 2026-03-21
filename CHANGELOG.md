@@ -189,6 +189,24 @@ Detailed log of all pipeline iterations with metrics, for post-competition publi
 
 ---
 
+# FINAL PHASE
+
+## Final v1 — 0.457 (2026-03-21 08:53)
+| Det | Asst | G | T | F | **Total** |
+|-----|------|---|---|---|-----------|
+| 0.696 | 0.637 | 0.647 | 1.000 | 1.042 | **0.457** |
+
+- First final submission. 900 questions, 303 documents (vs warmup: 100 Q, 30 docs).
+- **Critical bug found**: stale warmup cache was used initially (30 docs/590 pages). Fixed by clearing `.cache/final/`.
+- After fix: 4244 pages, 303 docs, 9592 article definitions, only 4 null answers.
+- **Det dropped 0.971→0.696**: deterministic extraction failing at scale. Wrong docs retrieved, extraction patterns insufficient for 10x doc diversity.
+- **G dropped 0.862→0.647**: grounding pages wrong — retrieval noise from 300+ docs dilutes precision.
+- **Asst dropped 0.720→0.637**: LLM context quality lower due to retrieval issues.
+- T=1.000 (perfect), F=1.042 (good speed).
+- **Diagnosis needed**: retrieval precision, deterministic extraction coverage, grounding page selection.
+
+---
+
 ## Score progression
 
 ```
@@ -207,6 +225,9 @@ v12 █████████████████████████�
 v13 ██████████████████████████████████████        0.756
 v14 ████████████████████████████████████████      0.791
 v15 █████████████████████████████████████         0.749
+
+FINAL:
+F-v1 ███████████████████████                       0.457
 ```
 
 ## Metric progression
@@ -227,6 +248,7 @@ v15 █████████████████████████�
 | v13 | 0.971 | 0.707 | 0.825 | 0.996 | 1225 | 1.031 | 0.756 |
 | v14 | 0.971 | 0.720 | 0.862 | 0.996 | — | 1.029 | 0.791 |
 | v15 | 0.929 | 0.640 | 0.862 | 0.996 | — | 1.037 | 0.749 |
+| **F-v1** | **0.696** | **0.637** | **0.647** | **1.000** | **—** | **1.042** | **0.457** |
 
 ## Key architectural decisions
 - **BM25+embeddings hybrid** with RRF fusion (not pure dense)

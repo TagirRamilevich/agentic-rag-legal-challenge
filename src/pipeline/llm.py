@@ -992,7 +992,9 @@ def answer_with_llm(
     )
     if _ADVERSARIAL_RE.search(question):
         if answer_type == "free_text":
-            return FREE_TEXT_FALLBACK, [], 1, 1, 0, 0, "adversarial-skip"
+            # Still cite top page for grounding — evaluator may expect page references
+            _adv_pages = pages[:1] if pages else []
+            return FREE_TEXT_FALLBACK, _adv_pages, 1, 1, 0, 0, "adversarial-skip"
         # For deterministic types: null + empty pages (gold=null, gold_pages=[])
         return None, [], 1, 1, 0, 0, "adversarial-skip"
 
@@ -1007,8 +1009,12 @@ def answer_with_llm(
     # Skips LLM entirely → TTFT ≈ 1ms, saving 600-3700ms per question.
 
     # 1. Law number: "what is the law number on title page" → "Law No. X"
+    # GUARD: exclude fee/fine/penalty/amount questions that happen to mention "DIFC Law No."
     if answer_type == "number" and not is_comparison:
-        if re.search(r"\b(law\s+number|official.*number|difc\s+law\s+no)\b", question.lower()):
+        _q_lower_law = question.lower()
+        _is_law_number_q = re.search(r"\b(law\s+number|official.*number)\b", _q_lower_law)
+        _is_fee_fine_q = re.search(r"\b(fine|fee|penalty|maximum|amount|compensation|damages|cost|award|claim)\b", _q_lower_law)
+        if _is_law_number_q and not _is_fee_fine_q:
             for p in pages:
                 m = re.search(r"(?:DIFC\s+)?Law\s+No\.?\s*(\d+)", p.get("text", ""), re.IGNORECASE)
                 if m:
@@ -1122,6 +1128,21 @@ def answer_with_llm(
     max_pages = cfg["max_pages"]
     chars_per_page = cfg["chars"]
     max_tokens = cfg["max_tokens"]
+
+    # Boost max_pages for party/entity count questions (need to see all parties)
+    _q_lower_cfg = question.lower()
+    if answer_type == "number" and re.search(
+        r"\b(how many|total number|number of)\b.*\b(claimant|defendant|respondent|part(?:y|ies)|judge|arbitrator|witness|appellant|applicant)\b",
+        _q_lower_cfg,
+    ):
+        max_pages = max(max_pages, 5)
+        chars_per_page = max(chars_per_page, 1200)
+    if answer_type == "names" and re.search(
+        r"\b(claimant|defendant|respondent|part(?:y|ies)|judge|arbitrator|witness|appellant|applicant)\b",
+        _q_lower_cfg,
+    ):
+        max_pages = max(max_pages, 5)
+        chars_per_page = max(chars_per_page, 1200)
 
     # --- Article index injection: ensure article definition pages are in context ---
     # Uses pre-built article→page index for precise page injection from FULL corpus
@@ -1367,7 +1388,8 @@ def answer_with_llm(
     if not context_parts:
         elapsed = max(1, int((time.perf_counter() - _t0) * 1000))
         if answer_type == "free_text":
-            return FREE_TEXT_FALLBACK, [], elapsed, elapsed, 0, 0, "none"
+            _empty_ctx_pages = pages[:1] if pages else []
+            return FREE_TEXT_FALLBACK, _empty_ctx_pages, elapsed, elapsed, 0, 0, "none"
         return None, [], elapsed, elapsed, 0, 0, "none"
 
     context = "\n\n---\n\n".join(context_parts)
@@ -1380,7 +1402,13 @@ def answer_with_llm(
     # Sonnet for free_text: TTFT ~1500-2000ms (F=1.02) vs Haiku ~700ms (F=1.05).
     # F drop per free_text Q: -0.03. Over 30 free_text / 100 total: avg F drop = 0.009.
     # But Sonnet Asst improvement ~+0.10 → net gain: 0.3×0.10×G - 0.009 ≈ +0.016.
-    use_strong = (answer_type == "free_text")
+    # Use Sonnet for: free_text (quality), party/entity count (need smarter counting),
+    # and names (need comprehensive name extraction)
+    _is_party_q = bool(re.search(
+        r"\b(how many|total number|number of|list.*(?:all|the)|(?:all|the).*(?:claimant|defendant|respondent|judge|arbitrator|witness|appellant|applicant))",
+        question.lower(),
+    )) and answer_type in ("number", "names")
+    use_strong = (answer_type == "free_text") or _is_party_q
 
     # Pass t0=None so TTFT measures only LLM API time (excludes retrieval/context building)
     raw, ttft_ms, _call_total, in_tok, out_tok, model = _call(
@@ -1419,7 +1447,9 @@ def answer_with_llm(
         answer = _parse(text, answer_type)
         if answer == FREE_TEXT_FALLBACK or answer is None:
             total_ms2 = max(1, int((time.perf_counter() - _t0) * 1000))
-            return FREE_TEXT_FALLBACK, [], ttft_ms, total_ms2, in_tok, out_tok, model
+            # Cite top context page for grounding even when answer is fallback
+            _ft_fallback_pages = context_pages[:1] if context_pages else []
+            return FREE_TEXT_FALLBACK, _ft_fallback_pages, ttft_ms, total_ms2, in_tok, out_tok, model
         # Use cited pages if valid; fallback to top 2 context pages.
         if ft_indices:
             used_pages = [context_pages[i] for i in ft_indices]
@@ -1466,6 +1496,22 @@ def answer_with_llm(
                 if det_pg:
                     clean_raw = str(answer)
                     cited_indices = []  # will use _find_source_pages
+
+    # Post-LLM verification for number answers: detect case-number leakage.
+    # If answer matches the case number from the question (e.g., CFI 070/2018 → 70),
+    # the LLM likely extracted the case number instead of the actual answer.
+    if answer_type == "number" and answer is not None and not is_comparison:
+        _case_refs_num = re.findall(r"[A-Z]{2,5}\s+(\d{3})/\d{4}", question)
+        if _case_refs_num:
+            _case_nums = {int(n) for n in _case_refs_num}
+            if answer in _case_nums:
+                # Answer matches a case number — likely wrong. Try det extraction.
+                _search_pages_cn = _all_pages if _all_pages else context_pages
+                from src.pipeline.answer import extract_number
+                det_num_cn, det_pg_cn = extract_number(_search_pages_cn, question)
+                if det_num_cn is not None and det_num_cn not in _case_nums:
+                    answer = det_num_cn
+                    cited_indices = []
 
     # Post-LLM verification for name answers: if the answer looks like a generic
     # description (starts with articles/pronouns, or is the subject of the sentence

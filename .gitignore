@@ -28,6 +28,12 @@ env/
 submission.json
 code_archive.zip
 
+# Publication / private notes
+reference/publication_plan.md
+reference/habr_article_draft.md
+reference/habr_article*.md
+submission_*.json
+
 # IDE
 .idea/
 .vscode/

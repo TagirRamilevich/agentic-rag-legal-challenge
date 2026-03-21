@@ -58,6 +58,23 @@ def build_doc_routing_index(pages: list[dict]) -> dict:
                 if len(law_title) > 8 and law_title not in law_to_doc:
                     law_to_doc[law_title] = doc_id
 
+    # Also extract consultation paper titles for disambiguation.
+    # Format: "CONSULTATION PAPER NO. X [SUBJECT]" on page 1-2
+    _cp_p = re.compile(
+        r"(CONSULTATION\s+PAPER\s+NO\.?\s*\d+[^.]*?)(?:\n|$)",
+        re.IGNORECASE,
+    )
+    for p in pages:
+        if p["page_number"] > 2:
+            continue
+        text = p["text"][:800]
+        for cp_match in _cp_p.findall(text):
+            cp_title = cp_match.strip()
+            if len(cp_title) > 20 and cp_title not in law_to_doc:
+                law_to_doc[cp_title] = p["doc_id"]
+                # Also store normalized version (upper case)
+                law_to_doc[cp_title.upper()] = p["doc_id"]
+
     index = {"case": case_to_doc, "law": law_to_doc}
     _DOC_ROUTE_CACHE[key] = index
     return index
@@ -296,13 +313,29 @@ def _hybrid_top(
     """Hybrid retrieval: BM25 + embedding search fused with RRF.
 
     Falls back to BM25-only if embeddings are None.
+    Applies doc diversity to prevent large documents from dominating results.
     """
     bm25_indices = _bm25_top(bm25, pages, query_str, top_k * 2,
                              original_query=original_query, answer_type=answer_type)
     if embeddings is None:
-        return bm25_indices[:top_k]
-    emb_indices = _embedding_top(embeddings, query_str, top_k * 2)
-    return _rrf_fuse(bm25_indices, emb_indices, top_k=top_k)
+        fused = bm25_indices
+    else:
+        emb_indices = _embedding_top(embeddings, query_str, top_k * 2)
+        fused = _rrf_fuse(bm25_indices, emb_indices, top_k=top_k * 2)
+
+    # Doc diversity: limit to max 5 pages per doc in top results.
+    # Prevents very large docs (e.g. 537-page DIFC Courts Rules) from filling all slots.
+    _doc_counts: dict[str, int] = {}
+    diverse: list[int] = []
+    _max_per_doc = 5
+    for idx in fused:
+        did = pages[idx]["doc_id"]
+        if _doc_counts.get(did, 0) < _max_per_doc:
+            diverse.append(idx)
+            _doc_counts[did] = _doc_counts.get(did, 0) + 1
+        if len(diverse) >= top_k:
+            break
+    return diverse
 
 
 def is_comparison_question(question: str) -> bool:
@@ -391,6 +424,28 @@ def retrieve_pages(
         case_norm = case_ref.upper().replace("  ", " ")
         if case_norm in doc_route["case"]:
             routed_doc_ids.add(doc_route["case"][case_norm])
+
+    # Quoted title matching: questions often quote the exact document title
+    # e.g. "CONSULTATION PAPER NO. 3 PROPOSED AMENDMENTS TO THE STRATA TITLE LAW"
+    # Use the quoted text to find the exact document via page-1 title matching.
+    _quoted_titles = re.findall(r'"([^"]{15,})"', question)
+    if not _quoted_titles:
+        _quoted_titles = re.findall(r'\u201c([^\u201d]{15,})\u201d', question)  # smart quotes
+    for _qt in _quoted_titles:
+        _qt_words = [w for w in _qt.upper().split() if len(w) > 2]
+        if len(_qt_words) < 3:
+            continue
+        _best_qt_doc = ""
+        _best_qt_score = 0
+        for _, _p1 in _page1_list:
+            _p1_upper = _p1["text"].upper()[:600]
+            _match_count = sum(1 for w in _qt_words if w in _p1_upper)
+            _score = _match_count / len(_qt_words)
+            if _score > _best_qt_score and _score >= 0.6:
+                _best_qt_score = _score
+                _best_qt_doc = _p1["doc_id"]
+        if _best_qt_doc:
+            routed_doc_ids.add(_best_qt_doc)
     # Extract multi-word law phrases from question (more specific than _LAW_REF_RE)
     _mw_law_q_re = re.compile(
         r"\b((?:[A-Z][a-z]+\s+){1,5}(?:Law|Regulations?)(?:\s+Amendment\s+Law)?)\b"
