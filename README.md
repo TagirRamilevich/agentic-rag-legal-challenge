@@ -58,4 +58,4 @@ python scripts/submit.py submission.json code_archive.zip
 
 ## Cost
 
-87.95 USD total API cost for the entire competition (17 warmup runs + 2 final submissions).
+87.95 USD total API cost for the entire competition (15 warmup runs + 2 final submissions).
